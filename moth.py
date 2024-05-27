@@ -14,24 +14,35 @@ import imageio
 from scipy import interpolate, ndimage
 from skimage.transform import resize
 
-
+#TODO: connect dpad to motor functions
+#TODO: import and init gigE cmaera
+#TODO: connect track button to motor functions 
+#TODO: enable roi draging 
+#TODO: [] to resize ROI 
+#TODO: mirror roi ro zoom view
+#TODO: import gigE.py
+#TODO: import motors.py 
+#TODO: add step_size_changed
+#TODO: add sld_changed 
+#TODO: import registration.py 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         sys.stdout = Stream(newText=self.onUpdateText)
 
-        self.setStyleSheet("background-color: black;")
-
+        self.setStyleSheet("QMainWindow { background-color: black; }")        
         self.setWindowTitle("Drag and Drop Files")
-        self.setGeometry(100, 100, 700, 700)
+        self.setGeometry(100, 100, 730, 730)
+        self.setMinimumSize(700,700)
+        self.aspect_ratio = 1
 
         self.view = ImageView()
         self.view.roi.sigRegionChanged.connect(self.updateRoi)
         self.controls = Contorls()
         self.logbox = QTextEdit("")
         self.logbox.setMinimumWidth(600)
-        self.logbox.setMaximumHeight(200)
-        self.logbox.setStyleSheet("background: rgb(50,50,50); color: black")
+        self.logbox.setFixedHeight(150)
+        self.logbox.setStyleSheet("background: rgb(30,30,30); color: rgb(30,70,30)")
         self.logbox.setReadOnly(True)
 
         hbox = QHBoxLayout()
@@ -45,6 +56,7 @@ class MainWindow(QMainWindow):
         self.frame = QFrame()
         self.frame.setLayout(vbox)
         self.setCentralWidget(self.frame)
+
         self.show()
 
     def onUpdateText(self, text):
@@ -60,10 +72,26 @@ class MainWindow(QMainWindow):
         except: 
             pass
 
+    def resizeEvent(self, event):
+        current_size = self.size()
+        new_width = current_size.width()
+        new_height = int(new_width / self.aspect_ratio)
+
+        if new_height > current_size.height():
+            new_height = current_size.height()
+            new_width = int(new_height * self.aspect_ratio)
+
+        self.resize(new_width, new_height)
+
+        super().resizeEvent(event)
+
 class Contorls(QWidget):
     def __init__(self):
         super(Contorls, self).__init__()
         self.setFixedSize(200,530)
+        self.initUI()
+        
+    def initUI(self):
         self.dpad = DPadWidget()
         self.zoom_view = zoomView()
         self.zoom_view.setAspectLocked(True)
@@ -73,6 +101,7 @@ class Contorls(QWidget):
 
         iconsize = 40
         self.focus_near = QPushButton("\U0001f337")
+        # self.focus_near.setStyleSheet("background-color: rgb(10,10,10);")
         self.focus_near.setFixedSize(iconsize,iconsize)
         self.focus_far = QPushButton("\U000026f0")
         self.focus_far.setFixedSize(iconsize,iconsize)
@@ -114,9 +143,6 @@ class Contorls(QWidget):
         layout.setSpacing(0)
         self.setLayout(layout)
 
-        self.initUI()
-
-    def initUI(self):
         pass
 
 class DPadWidget(QWidget):
@@ -313,6 +339,11 @@ class ImageView(pg.GraphicsLayoutWidget):
         print("end pos:", self.end_pos.x(), self.end_pos.y())
         if self.start_pos ==  self.end_pos:
             print("mouse clicked")
+            self.move2pos(self.start_pos)
+    
+    def move2pos(self):
+        #TODO: move motors to clicked positions
+        pass
 
 class Stream(QtCore.QObject):
     newText = pyqtSignal(str)
