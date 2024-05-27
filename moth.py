@@ -1,6 +1,6 @@
 import sys
 import PyQt5
-from PyQt5.QtWidgets import QStyle, QGridLayout, QPushButton, QComboBox, QGraphicsView, QGraphicsScene, QLabel, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QApplication, QWidget, QMainWindow, QTextEdit
+from PyQt5.QtWidgets import QStyle, QLineEdit, QGridLayout, QPushButton, QComboBox, QGraphicsView, QGraphicsScene, QLabel, QSlider, QVBoxLayout, QHBoxLayout, QFrame, QApplication, QWidget, QMainWindow, QTextEdit
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import pyqtSignal, QSize
 from PyQt5 import Qt, QtCore
@@ -15,45 +15,35 @@ from scipy import interpolate, ndimage
 from skimage.transform import resize
 
 
-#Need to fix the spot positioning after DRAGGING image
-#TODO: add element dropdown
-#TODO: add button to apply correction
-#TODO: add 
-#TODO: add function to calcaulate scale and angle offsets
-#TODO: add function to scale colume 
-#TODO: add function to rotate volume
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         sys.stdout = Stream(newText=self.onUpdateText)
 
-        # self.setStyleSheet("background-color: black;")
+        self.setStyleSheet("background-color: black;")
 
         self.setWindowTitle("Drag and Drop Files")
-        self.setGeometry(100, 100, 600, 600)
+        self.setGeometry(100, 100, 700, 700)
 
         self.view = ImageView()
+        self.view.roi.sigRegionChanged.connect(self.updateRoi)
         self.controls = Contorls()
         self.logbox = QTextEdit("")
-        self.logbox.setFixedWidth(600)
-        self.logbox.setStyleSheet("background: beige; color: black")
+        self.logbox.setMinimumWidth(600)
+        self.logbox.setMaximumHeight(200)
+        self.logbox.setStyleSheet("background: rgb(50,50,50); color: black")
         self.logbox.setReadOnly(True)
 
-        
-
-        vbox = QVBoxLayout()
-        vbox.addWidget(self.view)
-        vbox.addWidget(self.logbox)
-        # vbox.addWidget(self.logbox)
-        # vbox.addWidget(self.controls)
-
         hbox = QHBoxLayout()
-        hbox.addLayout(vbox)
+        hbox.addWidget(self.view)
         hbox.addWidget(self.controls)
 
+        vbox = QVBoxLayout()
+        vbox.addLayout(hbox)
+        vbox.addWidget(self.logbox)
+
         self.frame = QFrame()
-        self.frame.setLayout(hbox)
+        self.frame.setLayout(vbox)
         self.setCentralWidget(self.frame)
         self.show()
 
@@ -63,20 +53,63 @@ class MainWindow(QMainWindow):
         self.logbox.setTextCursor(cursor)
         self.logbox.ensureCursorVisible()
 
+    def updateRoi(self, roi):
+        try:
+            self.arr1 = roi.getArrayRegion(self.view.image_view.image, img=self.view.image_view)
+            self.controls.zoom_view.setImage(self.arr1)
+        except: 
+            pass
+
 class Contorls(QWidget):
     def __init__(self):
         super(Contorls, self).__init__()
-        self.setMinimumSize(200,600)
-        # Remove border spacing and margins
-
+        self.setFixedSize(200,530)
         self.dpad = DPadWidget()
-        
+        self.zoom_view = zoomView()
+        self.zoom_view.setAspectLocked(True)
+        self.step_size = QLineEdit()
+        self.step_size.setPlaceholderText("step_size")
+        self.step_size.setFixedWidth(100)
 
+        iconsize = 40
+        self.focus_near = QPushButton("\U0001f337")
+        self.focus_near.setFixedSize(iconsize,iconsize)
+        self.focus_far = QPushButton("\U000026f0")
+        self.focus_far.setFixedSize(iconsize,iconsize)
+        self.focus_sld = QSlider(Qt.Horizontal)
+        focus_box = QHBoxLayout()
+        focus_box.addWidget(self.focus_near)
+        focus_box.addWidget(self.focus_sld)
+        focus_box.addWidget(self.focus_far)
+
+        self.exposure_less = QPushButton("\U0000231B")
+        self.exposure_less.setFixedSize(iconsize,iconsize)
+        self.exposure_more = QPushButton("\U000023F3")
+        self.exposure_more.setFixedSize(iconsize,iconsize)
+        self.exposure_sld = QSlider(Qt.Horizontal)
+        fexposure_box = QHBoxLayout()
+        fexposure_box.addWidget(self.exposure_less)
+        fexposure_box.addWidget(self.exposure_sld)
+        fexposure_box.addWidget(self.exposure_more)
+
+        self.gain_less = QPushButton("\U0001F505")
+        self.gain_less.setFixedSize(iconsize,iconsize)
+        self.gain_more = QPushButton("\U0001F506")
+        self.gain_more.setFixedSize(iconsize,iconsize)
+        self.gain_sld = QSlider(Qt.Horizontal)
+        gain_box = QHBoxLayout()
+        gain_box.addWidget(self.gain_less)
+        gain_box.addWidget(self.gain_sld)
+        gain_box.addWidget(self.gain_more)
 
         layout = QVBoxLayout()
-        layout.addWidget(self.dpad)
+        layout.addWidget(self.dpad, alignment=QtCore.Qt.AlignTop)
+        layout.addWidget(self.step_size, alignment=QtCore.Qt.AlignCenter)
+        layout.addLayout(focus_box)
+        layout.addLayout(fexposure_box)
+        layout.addLayout(gain_box)
+        layout.addWidget(self.zoom_view)
 
-        
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.setLayout(layout)
@@ -94,30 +127,30 @@ class DPadWidget(QWidget):
         # self.setGeometry(100, 100, 200, 200)
         self.setFixedSize(200,200)
 
-
         # Create the layout
         layout = QGridLayout()
 
         # Create the buttons with arrow icons
+        iconsize = 32
         up_button = QPushButton()
         up_button.setIcon(self.style().standardIcon(getattr(QStyle, 'SP_ArrowUp')))
-        up_button.setIconSize(QSize(32, 32))
+        up_button.setIconSize(QSize(iconsize, iconsize))
         
         down_button = QPushButton()
         down_button.setIcon(self.style().standardIcon(getattr(QStyle, 'SP_ArrowDown')))
-        down_button.setIconSize(QSize(32, 32))
+        down_button.setIconSize(QSize(iconsize, iconsize))
         
         left_button = QPushButton()
         left_button.setIcon(self.style().standardIcon(getattr(QStyle, 'SP_ArrowLeft')))
-        left_button.setIconSize(QSize(32, 32))
+        left_button.setIconSize(QSize(iconsize, iconsize))
         
         right_button = QPushButton()
         right_button.setIcon(self.style().standardIcon(getattr(QStyle, 'SP_ArrowRight')))
-        right_button.setIconSize(QSize(32, 32))
+        right_button.setIconSize(QSize(iconsize, iconsize))
         
         center_button = QPushButton()
         center_button.setIcon(self.style().standardIcon(getattr(QStyle, 'SP_DialogYesButton')))
-        center_button.setIconSize(QSize(32, 32))
+        center_button.setIconSize(QSize(iconsize, iconsize))
 
         # Set fixed size for the buttons for a consistent look
         button_size = 50
@@ -141,6 +174,33 @@ class DPadWidget(QWidget):
         # Set the layout for the main widget
         self.setLayout(layout)
 
+
+class zoomView(pg.GraphicsLayoutWidget):
+    def __init__(self):
+        super(zoomView, self).__init__()
+        self.setFixedSize(200,200)
+        self.setAspectLocked(True)
+        self.initUI()
+
+    def initUI(self):
+        pg.setConfigOptions(imageAxisOrder='row-major')
+        self.setBackground("k")
+        self.arr = None
+        self.last_moving_pos = None
+        self.image_view = pg.ImageItem()
+        
+        border_pen = pg.mkPen(color=(255, 0, 0), width=2)
+
+        self.v2 = self.addViewBox(1,0)
+        self.v2.addItem(self.image_view)
+        self.v2.invertY(True)
+        self.v2.setAspectLocked(True)
+        self.v2.setMenuEnabled(False)
+        self.v2.setMouseEnabled(x=False, y=False)
+        self.v2.disableAutoRange()
+        self.v2.setBorder(None)
+        self.v2.setBorder(border_pen)
+
 class ImageView(pg.GraphicsLayoutWidget):
     mouseMoveSig = pyqtSignal(int,int, name= 'mouseMoveSig')
     mousePressSig =pyqtSignal(int,int,int, name= 'mousePressSig')
@@ -156,12 +216,10 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.last_moving_pos = None
         self.zoom_sf = 1
         self.image_view = pg.ImageItem()
-        self.zoom_view = pg.ImageItem()
-
-        self.roi = pg.RectROI(pos=(20,20), size=40, pen=(255, 0, 0), handlePen=(0,255,0))
+        
+        self.roi = pg.RectROI(pos=(10,10), size=20, pen=(255, 0, 0), handlePen=(0,255,0))
         self.roi.handleSize=1
-        self.roi.sigRegionChanged.connect(self.updateRoi)
-        border_pen = pg.mkPen(color=(255, 255, 255), width=2)
+        border_pen = pg.mkPen(color=(255, 0, 0), width=2)
 
         self.v2 = self.addViewBox(1,0)
         self.v2.addItem(self.image_view)
@@ -169,7 +227,7 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.v2.invertY(True)
         self.v2.setAspectLocked(True)
         self.v2.setMenuEnabled(False)
-        self.v2.setCursor(Qt.BlankCursor) 
+        self.v2.setCursor(Qt.CrossCursor) 
         self.v2.setMouseEnabled(x=False, y=False)
         self.v2.scene().sigMouseMoved.connect(self.mouseMoveEvent)
         self.v2.scene().sigMouseClicked.connect(self.mousePressEvent)
@@ -185,13 +243,6 @@ class ImageView(pg.GraphicsLayoutWidget):
         x = int(np.floor(xrange*0.025))
         y = int(np.floor(yrange*0.025))
 
-    def updateRoi(self, roi):
-        try:
-            self.arr1 = roi.getArrayRegion(self.image_view.image, img=self.image_view)
-            self.zoom_view.setImage(self.arr1)
-
-        except: 
-            pass
     def keyPressEvent(self, ev):
         if ev.key() == 45:
             self.zoom_sf=1.1
@@ -228,10 +279,10 @@ class ImageView(pg.GraphicsLayoutWidget):
         print(self.v2.pos())
 
     def mouseMoveEvent(self, ev):
-        self.v2.setCursor(Qt.BlankCursor) 
+        self.v2.setCursor(Qt.CrossCursor) 
         self.moving_pos = self.v2.mapSceneToView(ev.pos())
         self.mouseMoveSig.emit(self.moving_pos.x(), self.moving_pos.y())
-        self.roi.setPos([self.moving_pos.x(), self.moving_pos.y()], finish=False)
+        # self.roi.setPos([self.moving_pos.x(), self.moving_pos.y()], finish=False)
         diff = self.moving_pos - self.start_pos
         if self.last_moving_pos is None:
             self.last_moving_pos = self.start_pos
