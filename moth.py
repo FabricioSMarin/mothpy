@@ -57,7 +57,15 @@ class MainWindow(QMainWindow):
         self.frame.setLayout(vbox)
         self.setCentralWidget(self.frame)
 
+        #temporary### 
+        self.load_image()
         self.show()
+
+
+    def load_image(self):
+        file = "/Users/marinf/Downloads/DSC08280.JPG"
+        img = imageio.v3.imread(file)
+        self.view.image_view.setImage(img)
 
     def onUpdateText(self, text):
         cursor = self.logbox.textCursor()
@@ -68,7 +76,7 @@ class MainWindow(QMainWindow):
     def updateRoi(self, roi):
         try:
             self.arr1 = roi.getArrayRegion(self.view.image_view.image, img=self.view.image_view)
-            self.controls.zoom_view.setImage(self.arr1)
+            self.controls.zoom_view.image_view.setImage(self.arr1)
         except: 
             pass
 
@@ -276,6 +284,12 @@ class ImageView(pg.GraphicsLayoutWidget):
         elif ev.key() == 61:
             self.zoom_sf=0.9
             self.zoom(self.zoom_sf)
+        elif ev.key() == 91: #[
+            l = self.roi.size().x()
+            self.roi.setSize(l-2,l-2)
+        elif ev.key() == 93: #]
+            l = self.roi.size().x()
+            self.roi.setSize(l-2,l-2)
         elif ev.key() == 48: #reset view
             self.reset_view()
         else:
