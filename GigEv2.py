@@ -2,11 +2,12 @@ import sys
 import cv2
 import numpy as np
 import os
+import matplotlib.pyplot as plt
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFileDialog
 )
 from PyQt5.QtCore import Qt, QTimer, QRect, QDateTime, QPoint
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen
+from PyQt5.QtGui import QImage, QPixmap
 from pypylon import pylon
 
 
@@ -26,6 +27,10 @@ class FlirCameraWidget(QWidget):
         self.resizing_region = None
         self.dragging = False
         self.drag_start_pos = QPoint()
+
+        # Tracking data for the second zoom region
+        self.region_center_positions_x = []
+        self.region_center_positions_y = []
 
         # Create UI elements
         self.initUI()
@@ -55,12 +60,15 @@ class FlirCameraWidget(QWidget):
             zoom_info_layout.addWidget(lbl)
         layout.addLayout(zoom_info_layout)
 
+        self.brightest_feature_label = QLabel("Tracking Feature Displacement: (ΔX, ΔY)")
+        self.brightest_feature_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.brightest_feature_label)
+
         zoom_layout = QHBoxLayout()
         self.zoom_labels = [QLabel("Zoom Region 1"), QLabel("Zoom Region 2")]
-        for i, lbl in enumerate(self.zoom_labels):
+        for lbl in self.zoom_labels:
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setFixedSize(150, 150)
-            lbl.mousePressEvent = lambda event, idx=i: self.zoom_click_event(event, idx)
             zoom_layout.addWidget(lbl)
         layout.addLayout(zoom_layout)
 
@@ -77,6 +85,10 @@ class FlirCameraWidget(QWidget):
         self.capture_button = QPushButton("Capture Image")
         self.capture_button.clicked.connect(self.capture_image)
         btn_layout.addWidget(self.capture_button)
+
+        self.show_graph_button = QPushButton("Show Region Center Position Graph")
+        self.show_graph_button.clicked.connect(self.show_region_center_graph)
+        btn_layout.addWidget(self.show_graph_button)
 
         layout.addLayout(btn_layout)
         self.setLayout(layout)
@@ -115,15 +127,14 @@ class FlirCameraWidget(QWidget):
                 self.image = img  # Store for zoomed regions
                 self.display_image(img)
 
+                # Track the brightest feature in second zoom region and reposition box
+                self.track_and_reposition_zoom_region(img)
+
             grab_result.Release()
 
     def display_image(self, img):
-        """Displays the main image with crosshairs and zoomed regions."""
+        """Displays the main image with zoomed regions."""
         h, w, ch = img.shape
-
-        # Draw crosshairs
-        cv2.line(img, (w//2, 0), (w//2, h), (0, 0, 255), 1)
-        cv2.line(img, (0, h//2), (w, h//2), (0, 0, 255), 1)
 
         # Draw zoom regions
         for rect in self.zoom_regions:
@@ -134,18 +145,28 @@ class FlirCameraWidget(QWidget):
         qt_img = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888)
         self.image_label.setPixmap(QPixmap.fromImage(qt_img))
 
-        # Update Zoomed Regions and XY Labels
-        for i, rect in enumerate(self.zoom_regions):
-            zoom_img = img[rect.y():rect.y()+rect.height(), rect.x():rect.x()+rect.width()]
-            zoom_img = cv2.resize(zoom_img, (150, 150))
-            bytes_per_line = 3 * 150
-            qt_zoom_img = QImage(zoom_img.data, 150, 150, bytes_per_line, QImage.Format_RGB888)
-            self.zoom_labels[i].setPixmap(QPixmap.fromImage(qt_zoom_img))
+    def track_and_reposition_zoom_region(self, img):
+        """Find the brightest feature inside the second zoom region and reposition it."""
+        zoom_rect = self.zoom_regions[1]  # Second zoom region
+        zoom_img = img[zoom_rect.y():zoom_rect.y()+zoom_rect.height(), zoom_rect.x():zoom_rect.x()+zoom_rect.width()]
 
-            # Update Region Center Position
-            center_x = rect.x() + rect.width() // 2
-            center_y = rect.y() + rect.height() // 2
-            self.zoom_info_labels[i].setText(f"Region {i+1}: ({center_x}, {center_y})")
+        # Convert to grayscale
+        gray = cv2.cvtColor(zoom_img, cv2.COLOR_RGB2GRAY)
+
+        # Find the brightest pixel
+        _, maxVal, _, maxLoc = cv2.minMaxLoc(gray)
+        feature_x, feature_y = maxLoc
+
+        # Compute the new position of the zoom region to center the feature
+        new_x = zoom_rect.x() + feature_x - (zoom_rect.width() // 2)
+        new_y = zoom_rect.y() + feature_y - (zoom_rect.height() // 2)
+
+        # Update zoom region position
+        self.zoom_regions[1].moveTo(new_x, new_y)
+
+        # Log center position over time
+        self.region_center_positions_x.append(new_x + zoom_rect.width() // 2)
+        self.region_center_positions_y.append(new_y + zoom_rect.height() // 2)
 
     def image_mouse_press(self, event):
         """Detects if a zoom region is clicked and initiates resizing."""
@@ -170,18 +191,3 @@ class FlirCameraWidget(QWidget):
         """Stops resizing."""
         self.resizing_region = None
         self.dragging = False
-
-    def capture_image(self):
-        """Capture a single image and save it."""
-        if self.image is not None:
-            timestamp = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
-            filename = os.path.join(self.save_directory, f"flir_capture_{timestamp}.png")
-            cv2.imwrite(filename, cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR))
-            print(f"Image saved: {filename}")
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = FlirCameraWidget()
-    window.show()
-    sys.exit(app.exec_())
