@@ -2,16 +2,23 @@
 #include <WebServer.h>
 #include <Preferences.h>
 
+// WiFi Credentials (Change these)
+const char* ssid = "Marinf2.4";
+const char* password = "3V@$!VE_Wifi2.4";
+
+WebServer server(80); // Add this line to declare the server instance
+Preferences preferences;
+
 #define MOTOR_COUNT 3
 
 // **Stepper Motor Pin Assignments**
-#define STEP_PIN_1 26
-#define DIR_PIN_1  32
-#define ENABLE_PIN_1 14
+#define STEP_PIN_1 15
+#define DIR_PIN_1  14
+#define ENABLE_PIN_1 13
 
-#define STEP_PIN_2 25
-#define DIR_PIN_2  33
-#define ENABLE_PIN_2 21
+#define STEP_PIN_2 16
+#define DIR_PIN_2  17
+#define ENABLE_PIN_2 18
 
 #define STEP_PIN_3 27
 #define DIR_PIN_3  22
@@ -28,55 +35,71 @@ long softLimitNegative[MOTOR_COUNT] = {-10000, -10000, -10000};
 float stepsPerUnit[MOTOR_COUNT] = {200.0, 200.0, 200.0}; // Steps per degree/mm
 String unitType[MOTOR_COUNT] = {"degrees", "degrees", "degrees"};
 
-Preferences preferences;
 
 // **Stepper Motor Struct**
 struct StepperMotor {
     int stepPin;
     int dirPin;
     int enablePin;
-    bool lastDirection;
+    int targetSteps;
+    int currentStep;
+    int stepDelay;
+    int velocity;
+    int accelSteps;
+    bool active;
+    bool lastDirection;  // Stores the last direction (true = forward, false = backward)
 };
-
 // **Motor Definitions**
+// Define Motors
 StepperMotor motors[MOTOR_COUNT] = {
-    {STEP_PIN_1, DIR_PIN_1, ENABLE_PIN_1, true},
-    {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, true},
-    {STEP_PIN_3, DIR_PIN_3, ENABLE_PIN_3, true}
+    {STEP_PIN_1, DIR_PIN_1, ENABLE_PIN_1, 0, 0, 0, 0, 0, false, true},
+    {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, 0, 0, 0, 0, 0, false, true},
+    {STEP_PIN_3, DIR_PIN_3, ENABLE_PIN_3, 0, 0, 0, 0, 0, false, true}
 };
 
 void setup() {
     Serial.begin(115200);
-    preferences.begin("motor_settings", false);
-
+    
+    preferences.begin("backlash", false);
     for (int i = 0; i < MOTOR_COUNT; i++) {
-        pinMode(motors[i].stepPin, OUTPUT);
-        pinMode(motors[i].dirPin, OUTPUT);
-        pinMode(motors[i].enablePin, OUTPUT);
-        digitalWrite(motors[i].enablePin, LOW);
-
-        stepsPerUnit[i] = preferences.getFloat(("motor" + String(i+1) + "_res").c_str(), stepsPerUnit[i]);
-        unitType[i] = preferences.getString(("motor" + String(i+1) + "_unit").c_str(), unitType[i]);
-        backlashSteps[i] = preferences.getInt(("motor" + String(i+1) + "_backlash").c_str(), backlashSteps[i]);
-        motorPositions[i] = preferences.getLong(("motor" + String(i+1) + "_position").c_str(), motorPositions[i]);
-        softLimitPositive[i] = preferences.getLong(("motor" + String(i+1) + "_soft_pos").c_str(), softLimitPositive[i]);
-        softLimitNegative[i] = preferences.getLong(("motor" + String(i+1) + "_soft_neg").c_str(), softLimitNegative[i]);
+        backlashSteps[i] = preferences.getInt(("motor" + String(i+1)).c_str(), backlashSteps[i]);
     }
-
-    WiFi.begin("Your_SSID", "Your_PASSWORD");
+    
+    WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) { delay(500); }
-
-    serverSetup();
-}
-
-void loop() {
-    server.handleClient();
-}
-
-// **Server Setup**
-void serverSetup() {
+    
     server.on("/", []() { server.send(200, "text/html", webpage); });
 
+    server.on("/command", []() {
+        String cmd = server.arg("cmd");
+        processCommand(cmd);
+        server.send(200, "text/plain", "Command Received: " + cmd);
+    });
+
+   // Emergency Stop
+    server.on("/emergency_stop", []() {
+        emergencyStop = true;
+        server.send(200, "text/plain", "Emergency stop activated!");
+    });
+
+    // Pause/Resume
+    server.on("/pause", []() {
+        paused = !paused;
+        server.send(200, "text/plain", paused ? "Motors paused!" : "Motors resumed!");
+    });
+
+    // Enable/Disable Motors
+    server.on("/set_motor_state", []() {
+        int motor = server.arg("motor").toInt() - 1;
+        bool enableState = server.arg("state").toInt();
+
+        if (motor >= 0 && motor < MOTOR_COUNT) {
+            digitalWrite(motors[motor].enablePin, enableState ? LOW : HIGH);
+            server.send(200, "text/plain", enableState ? "Motor enabled" : "Motor disabled");
+        }
+    });
+
+    // Set Resolution
     server.on("/set_resolution", []() {
         int motor = server.arg("motor").toInt() - 1;
         float res = server.arg("res").toFloat();
@@ -91,48 +114,69 @@ void serverSetup() {
         }
     });
 
-    server.on("/move_motor", []() {
+    // Set Soft Limits
+    server.on("/set_soft_limits", []() {
         int motor = server.arg("motor").toInt() - 1;
-        char direction = server.arg("dir").charAt(0);
-        int steps = server.arg("steps").toInt();
+        long posLimit = server.arg("posLimit").toInt();
+        long negLimit = server.arg("negLimit").toInt();
 
         if (motor >= 0 && motor < MOTOR_COUNT) {
-            long newPosition = motorPositions[motor] + (direction == 'F' ? steps : -steps);
-
-            if (newPosition > softLimitPositive[motor] || newPosition < softLimitNegative[motor]) {
-                server.send(400, "text/plain", "Move blocked: Out of limits.");
-                return;
-            }
-
-            if ((direction == 'F' && motors[motor].lastDirection == false) ||
-                (direction == 'B' && motors[motor].lastDirection == true)) {
-                newPosition += (direction == 'F' ? backlashSteps[motor] : -backlashSteps[motor]);
-            }
-
-            motorPositions[motor] = newPosition;
-            preferences.putLong(("motor" + String(motor+1) + "_position").c_str(), motorPositions[motor]);
-
-            motors[motor].lastDirection = (direction == 'F');
-            executeMove(motor, direction, steps);
-            server.send(200, "text/plain", "Move executed.");
+            softLimitPositive[motor] = posLimit;
+            softLimitNegative[motor] = negLimit;
+            preferences.putLong(("motor" + String(motor+1) + "_soft_pos").c_str(), posLimit);
+            preferences.putLong(("motor" + String(motor+1) + "_soft_neg").c_str(), negLimit);
+            server.send(200, "text/plain", "Soft limits updated.");
         }
     });
 
+    server.on("/set_backlash", []() {
+        int motor = server.arg("motor").toInt() - 1;
+        int steps = server.arg("steps").toInt();
+        if (motor >= 0 && motor < MOTOR_COUNT) {
+            backlashSteps[motor] = steps;
+            preferences.putInt(("motor" + String(motor+1)).c_str(), steps);
+            server.send(200, "text/plain", "Backlash updated.");
+        } else {
+            server.send(400, "text/plain", "Invalid motor number.");
+        }
+    });
+
+    server.on("/set_position", []() {
+        int motor = server.arg("motor").toInt() - 1;
+        long pos = server.arg("pos").toInt();
+        if (motor >= 0 && motor < MOTOR_COUNT) {
+            motorPositions[motor] = pos;
+            preferences.putLong(("motor" + String(motor+1) + "_position").c_str(), pos);
+            server.send(200, "text/plain", "Position updated.");
+        }
+    });
+
+    server.on("/get_positions", []() {
+        String positions = "";
+        for (int i = 0; i < MOTOR_COUNT; i++) {
+            positions += "Motor " + String(i+1) + ": " + String(motorPositions[i]) + " steps<br>";
+        }
+        server.send(200, "text/html", positions);
+    });
     server.begin();
 }
 
-// **Execute Motor Movement**
-void executeMove(int motor, char direction, int steps) {
-    digitalWrite(motors[motor].dirPin, direction == 'F' ? HIGH : LOW);
-    for (int i = 0; i < steps; i++) {
-        digitalWrite(motors[motor].stepPin, HIGH);
-        delayMicroseconds(500);
-        digitalWrite(motors[motor].stepPin, LOW);
-        delayMicroseconds(500);
+void loop() {
+    server.handleClient();
+    if (Serial.available()) {
+        String command = Serial.readStringUntil('\n');
+        command.trim();
+        processCommand(command);
     }
+    moveMotorsSynchronously();
 }
 
-// **HTML Web Interface**
+
+//TODO: change MOVE MOTOR function to sendCommand example below
+//   <button onclick="sendCommand('1,B,2000,500,300')">Move Motor 1 Backward</button><br>
+//    <button onclick="sendCommand('2,F,1500,700,400')">Move Motor 2 Forward</button>
+
+// **Web Interface**
 const char webpage[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -147,37 +191,204 @@ const char webpage[] PROGMEM = R"rawliteral(
 <body>
     <h2>Stepper Motor Control</h2>
 
-    <h3>Set Motor Resolution & Units</h3>
-    <label>Motor 1: <input type="number" id="res1"> Steps per <select id="unit1">
-        <option value="degrees">Degrees</option>
-        <option value="mm">Millimeters</option>
-        <option value="revolutions">Revolutions</option>
-    </select></label>
-    <button onclick="setResolution(1)">Set</button><br>
+    <h3>Enable/Disable Motors</h3>
+    <div>
+        <button onclick="setMotorState(1, 1)">Enable Motor 1</button>
+        <button onclick="setMotorState(1, 0)">Disable Motor 1</button><br>
 
-    <h3>Move Motor</h3>
-    <label>Motor 1: Direction <select id="dir1"><option value="F">Forward</option><option value="B">Backward</option></select></label>
-    <input type="number" id="steps1" placeholder="Steps">
-    <button onclick="moveMotor(1)">Move</button><br>
+        <button onclick="setMotorState(2, 1)">Enable Motor 2</button>
+        <button onclick="setMotorState(2, 0)">Disable Motor 2</button><br>
+
+        <button onclick="setMotorState(3, 1)">Enable Motor 3</button>
+        <button onclick="setMotorState(3, 0)">Disable Motor 3</button><br>
+    </div>
+
+    <h3>Set Motor Resolution & Units</h3>
+    <div>
+        <label>Motor 1: <input type="number" id="res1"> <select id="unit1">
+            <option value="degrees">Degrees</option>
+            <option value="mm">Millimeters</option>
+        </select></label>
+        <button onclick="setResolution(1)">Set</button><br>
+
+        <label>Motor 2: <input type="number" id="res2"> <select id="unit2">
+            <option value="degrees">Degrees</option>
+            <option value="mm">Millimeters</option>
+        </select></label>
+        <button onclick="setResolution(2)">Set</button><br>
+
+        <label>Motor 3: <input type="number" id="res3"> <select id="unit3">
+            <option value="degrees">Degrees</option>
+            <option value="mm">Millimeters</option>
+        </select></label>
+        <button onclick="setResolution(3)">Set</button><br>
+    </div>
+
+    <h3>Set Soft Limits</h3>
+    <div>
+        <label>Motor 1: Pos Limit <input type="number" id="posLimit1"> Neg Limit <input type="number" id="negLimit1"></label>
+        <button onclick="setSoftLimits(1)">Set</button><br>
+
+        <label>Motor 2: Pos Limit <input type="number" id="posLimit2"> Neg Limit <input type="number" id="negLimit2"></label>
+        <button onclick="setSoftLimits(2)">Set</button><br>
+
+        <label>Motor 3: Pos Limit <input type="number" id="posLimit3"> Neg Limit <input type="number" id="negLimit3"></label>
+        <button onclick="setSoftLimits(3)">Set</button><br>
+    </div>
+
+    <h3>Move Motors</h3>
+    <div>
+        <label>Motor 1: <select id="dir1">
+            <option value="F">Forward</option>
+            <option value="B">Backward</option>
+        </select> Steps: <input type="number" id="steps1">
+        <button onclick="moveMotor(1)">Move</button><br>
+
+        <label>Motor 2: <select id="dir2">
+            <option value="F">Forward</option>
+            <option value="B">Backward</option>
+        </select> Steps: <input type="number" id="steps2">
+        <button onclick="moveMotor(2)">Move</button><br>
+
+        <label>Motor 3: <select id="dir3">
+            <option value="F">Forward</option>
+            <option value="B">Backward</option>
+        </select> Steps: <input type="number" id="steps3">
+        <button onclick="moveMotor(3)">Move</button><br>
+    </div>
+
+    <h3>Controls</h3>
+    <button onclick="emergencyStop()">Emergency Stop</button>
+    <button onclick="togglePause()">Pause/Resume</button>
 
     <h3>Real-Time Positions</h3>
     <div id="positions"></div>
 
     <script>
-        function setResolution(motor) {
-            let res = document.getElementById("res" + motor).value;
-            let unit = document.getElementById("unit" + motor).value;
-            fetch(`/set_resolution?motor=${motor}&res=${res}&unit=${unit}`);
-        }
-
         function moveMotor(motor) {
             let dir = document.getElementById("dir" + motor).value;
             let steps = document.getElementById("steps" + motor).value;
             fetch(`/move_motor?motor=${motor}&dir=${dir}&steps=${steps}`);
         }
 
-        setInterval(() => fetch("/get_positions").then(res => res.text()).then(data => document.getElementById("positions").innerHTML = data), 1000);
+        function setMotorState(motor, state) {
+            fetch(`/set_motor_state?motor=${motor}&state=${state}`)
+                .then(response => response.text())
+                .then(data => alert(data));
+        }
+
+        function setResolution(motor) {
+            let res = document.getElementById("res" + motor).value;
+            let unit = document.getElementById("unit" + motor).value;
+            fetch(`/set_resolution?motor=${motor}&res=${res}&unit=${unit}`)
+                .then(response => response.text())
+                .then(data => alert(data));
+        }
+
+        function setSoftLimits(motor) {
+            let posLimit = document.getElementById("posLimit" + motor).value;
+            let negLimit = document.getElementById("negLimit" + motor).value;
+            fetch(`/set_soft_limits?motor=${motor}&posLimit=${posLimit}&negLimit=${negLimit}`)
+                .then(response => response.text())
+                .then(data => alert(data));
+        }
+
+        function emergencyStop() {
+            fetch("/emergency_stop");
+            alert("Emergency Stop Activated!");
+        }
+
+        function togglePause() {
+            fetch("/pause")
+                .then(response => response.text())
+                .then(data => alert(data));
+        }
+
+        function sendCommand(cmd) {
+            fetch("/command?cmd=" + cmd);
+        }
+
+        // Update motor positions every second
+        setInterval(() => {
+            fetch("/get_positions")
+                .then(res => res.text())
+                .then(data => document.getElementById("positions").innerHTML = data);
+        }, 1000);
     </script>
 </body>
 </html>
 )rawliteral";
+
+
+// Process Commands from Serial or Web
+void processCommand(String command) {
+    if (command.equalsIgnoreCase("STOP")) {
+        emergencyStop = true;
+        Serial.println("EMERGENCY STOP: All motors halted.");
+        return;
+    } else if (command.equalsIgnoreCase("PAUSE")) {
+        paused = true;
+        Serial.println("PAUSE: Motors paused.");
+        return;
+    } else if (command.equalsIgnoreCase("RESUME")) {
+        paused = false;
+        Serial.println("RESUME: Motors resuming.");
+        return;
+    }
+
+    int motorNum;
+    char direction;
+    int steps;
+    int velocity;
+    int accelTime;
+
+    if (sscanf(command.c_str(), "%d,%c,%d,%d,%d", &motorNum, &direction, &steps, &velocity, &accelTime) == 5) {
+        if (motorNum >= 1 && motorNum <= MOTOR_COUNT) {
+            int motorIndex = motorNum - 1;
+            bool newDirection = (direction == 'F' || direction == 'f');
+
+            if (motors[motorIndex].lastDirection != newDirection) {
+                // Apply backlash compensation
+                Serial.printf("Backlash Compensation: Motor %d moving extra %d steps.\n", motorNum, backlashSteps[motorIndex]);
+                digitalWrite(motors[motorIndex].dirPin, newDirection ? HIGH : LOW);
+                moveSteps(motorIndex, backlashSteps[motorIndex], 500);
+                moveSteps(motorIndex, -backlashSteps[motorIndex], 500);
+            }
+
+            digitalWrite(motors[motorIndex].dirPin, newDirection ? HIGH : LOW);
+            motors[motorIndex].targetSteps = steps;
+            motors[motorIndex].currentStep = 0;
+            motors[motorIndex].velocity = velocity;
+            motors[motorIndex].accelSteps = (steps / 2 < (velocity * accelTime / 1000)) ? steps / 2 : (velocity * accelTime / 1000);
+            motors[motorIndex].active = true;
+            motors[motorIndex].lastDirection = newDirection;
+        }
+    }
+}
+
+// Move Specific Steps
+void moveSteps(int motorIndex, int steps, int delayTime) {
+    for (int i = 0; i < abs(steps); i++) {
+        digitalWrite(motors[motorIndex].stepPin, HIGH);
+        delayMicroseconds(delayTime);
+        digitalWrite(motors[motorIndex].stepPin, LOW);
+        delayMicroseconds(delayTime);
+    }
+}
+
+// Synchronized Motion Control (Same as before)
+void moveMotorsSynchronously() {
+    for (int i = 0; i < MOTOR_COUNT; i++) {
+        if (motors[i].active && motors[i].currentStep < motors[i].targetSteps) {
+            digitalWrite(motors[i].stepPin, HIGH);
+            delayMicroseconds(500);
+            digitalWrite(motors[i].stepPin, LOW);
+            motors[i].currentStep++;
+
+            if (motors[i].currentStep >= motors[i].targetSteps) {
+                motors[i].active = false;
+            }
+        }
+    }
+}
+
