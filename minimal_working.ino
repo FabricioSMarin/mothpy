@@ -133,11 +133,8 @@ void loop() {
         command.trim();
         processCommand(command);
     }
-    moveMotorsSynchronously();
 }
 
-
-// Process Commands from Serial or Web
 void processCommand(String command) {
     int motorNum;
     char direction;
@@ -145,20 +142,29 @@ void processCommand(String command) {
     int velocity;
     int accelTime;
 
+    Serial.println("Processing command: " + command); // Debugging
+
     if (sscanf(command.c_str(), "%d,%c,%d,%d,%d", &motorNum, &direction, &steps, &velocity, &accelTime) == 5) {
+        Serial.printf("Parsed command: Motor %d, Direction %c, Steps %d, Velocity %d, Accel %d\n",
+                      motorNum, direction, steps, velocity, accelTime);
+
         if (motorNum >= 1 && motorNum <= MOTOR_COUNT) {
             int motorIndex = motorNum - 1;
             bool newDirection = (direction == 'F' || direction == 'f');
 
+            Serial.printf("Setting Motor %d Direction: %s\n", motorNum, newDirection ? "FORWARD" : "BACKWARD");
+            digitalWrite(motors[motorIndex].dirPin, newDirection ? HIGH : LOW);
+
+            // Backlash Compensation
             if (motors[motorIndex].lastDirection != newDirection) {
-                // Apply backlash compensation
-                Serial.printf("Backlash Compensation: Motor %d moving extra %d steps.\n", motorNum, backlashSteps[motorIndex]);
-                digitalWrite(motors[motorIndex].dirPin, newDirection ? HIGH : LOW);
-                moveSteps(motorIndex, backlashSteps[motorIndex], 500);
-                moveSteps(motorIndex, -backlashSteps[motorIndex], 500);
+                Serial.printf("Applying Backlash Compensation: %d steps\n", backlashSteps[motorIndex]);
+                moveSteps(motorIndex, backlashSteps[motorIndex], velocity);
+                moveSteps(motorIndex, -backlashSteps[motorIndex], velocity);
             }
 
-            digitalWrite(motors[motorIndex].dirPin, newDirection ? HIGH : LOW);
+            Serial.printf("Moving Motor %d: %d steps at velocity %d\n", motorNum, steps, velocity);
+            moveSteps(motorIndex, steps, velocity);
+
             motors[motorIndex].targetSteps = steps;
             motors[motorIndex].currentStep = 0;
             motors[motorIndex].velocity = velocity;
@@ -166,34 +172,51 @@ void processCommand(String command) {
             motors[motorIndex].active = true;
             motors[motorIndex].lastDirection = newDirection;
         }
+    } else {
+        Serial.println("Invalid Command Format!");
     }
 }
 
-// Move Specific Steps
-void moveSteps(int motorIndex, int steps, int delayTime) {
-    digitalWrite(motors[motorIndex].enablePin, LOW);
-    for (int i = 0; i < abs(steps); i++) {
-        digitalWrite(motors[motorIndex].stepPin, HIGH);
-        delayMicroseconds(delayTime);
-        digitalWrite(motors[motorIndex].stepPin, LOW);
-        delayMicroseconds(delayTime);
+void moveSteps(int motorIndex, int steps, int maxSpeed) {
+    digitalWrite(motors[motorIndex].enablePin, LOW); // Ensure motor is enabled
+    Serial.printf("Motor %d | Steps: %d | Max Speed: %d\n", motorIndex + 1, steps, maxSpeed);
+
+    int accelSteps = motors[motorIndex].accelSteps; // Acceleration step count
+    int decelSteps = accelSteps; // Deceleration step count
+    int cruiseSteps = steps - (accelSteps + decelSteps); // Remaining steps
+
+    int minDelay = 1000000/maxSpeed;  // Fastest step delay in µs
+    int maxDelay = 2000; // Slowest step delay for acceleration start
+    int stepDelay = maxDelay; // Start slow
+
+    Serial.printf("Motor %d | Accel: %d | Cruise: %d | Decel: %d\n", motorIndex + 1, accelSteps, cruiseSteps, decelSteps);
+
+    // **Acceleration Phase**
+    for (int i = 0; i < accelSteps; i++) {
+        stepDelay = maxDelay - ((maxDelay - minDelay) * i / accelSteps); // Decrease delay
+        stepOnce(motorIndex, stepDelay);
     }
-    moveMotorsSynchronously();
+
+    // **Cruise Phase (Constant Speed)**
+    for (int i = 0; i < cruiseSteps; i++) {
+        stepOnce(motorIndex, minDelay);
+    }
+
+    // **Deceleration Phase**
+    for (int i = 0; i < decelSteps; i++) {
+        stepDelay = minDelay + ((maxDelay - minDelay) * i / decelSteps); // Increase delay
+        stepOnce(motorIndex, stepDelay);
+    }
+
+    Serial.printf("Motor %d Movement Complete\n", motorIndex + 1);
 }
 
-// Synchronized Motion Control (Same as before)
-void moveMotorsSynchronously() {
-    for (int i = 0; i < MOTOR_COUNT; i++) {
-        if (motors[i].active && motors[i].currentStep < motors[i].targetSteps) {
-            digitalWrite(motors[i].stepPin, HIGH);
-            delayMicroseconds(500);
-            digitalWrite(motors[i].stepPin, LOW);
-            motors[i].currentStep++;
-
-            if (motors[i].currentStep >= motors[i].targetSteps) {
-                motors[i].active = false;
-            }
-        }
-    }
+// **Single Step Function (Helper)**
+void stepOnce(int motorIndex, int delayTime) {
+    Serial.printf("Stepping Motor %d | Delay: %d µs\n", motorIndex + 1, delayTime);
+    digitalWrite(motors[motorIndex].stepPin, HIGH);
+    delayMicroseconds(delayTime);
+    digitalWrite(motors[motorIndex].stepPin, LOW);
+    delayMicroseconds(delayTime);
 }
 

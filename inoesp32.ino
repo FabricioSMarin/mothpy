@@ -27,7 +27,7 @@ Preferences preferences;
 
 volatile bool emergencyStop = false;
 volatile bool paused = false;
-
+//NOTE: nema17 RPM range 100-500 == 600us delay (could have sworn I've gone to 200-300us..)
 // **Persistent Data: Backlash, Position, Resolution, Soft Limits**
 int backlashSteps[MOTOR_COUNT] = {5, 3, 4};
 int motorVelocities[MOTOR_COUNT] = {500,400,300};
