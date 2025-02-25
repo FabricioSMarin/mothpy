@@ -186,4 +186,41 @@ void moveSteps(int motorIndex, int steps, int maxSpeed) {
     int cruiseSteps = steps - (accelSteps + decelSteps); // Remaining steps
 
     int minDelay = 1000000/maxSpeed;  // Fastest step delay in µs
-    int maxDelay = 2
+    int maxDelay = 2000; // Slowest step delay for acceleration start
+    int stepDelay = maxDelay; // Start slow
+
+    Serial.printf("Motor %d | Accel: %d | Cruise: %d | Decel: %d\n", motorIndex + 1, accelSteps, cruiseSteps, decelSteps);
+
+    // **Acceleration Phase**
+    for (int i = 0; i < accelSteps; i++) {
+        stepDelay = maxDelay - ((maxDelay - minDelay) * i / accelSteps); // Decrease delay
+        stepOnce(motorIndex, stepDelay);
+    }
+
+    // **Cruise Phase (Constant Speed)**
+    for (int i = 0; i < cruiseSteps; i++) {
+        digitalWrite(motors[motorIndex].stepPin, HIGH);
+        delayMicroseconds(stepDelay);
+        digitalWrite(motors[motorIndex].stepPin, LOW);
+        delayMicroseconds(stepDelay);
+    }
+
+
+    // **Deceleration Phase**
+    for (int i = 0; i < decelSteps; i++) {
+        stepDelay = minDelay + ((maxDelay - minDelay) * i / decelSteps); // Increase delay
+        stepOnce(motorIndex, stepDelay);
+    }
+
+    Serial.printf("Motor %d Movement Complete\n", motorIndex + 1);
+}
+
+// **Single Step Function (Helper)**
+void stepOnce(int motorIndex, int delayTime) {
+    Serial.printf("Stepping Motor %d | Delay: %d µs\n", motorIndex + 1, delayTime);
+    digitalWrite(motors[motorIndex].stepPin, HIGH);
+    delayMicroseconds(delayTime);
+    digitalWrite(motors[motorIndex].stepPin, LOW);
+    delayMicroseconds(delayTime);
+}
+
