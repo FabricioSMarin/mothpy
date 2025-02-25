@@ -28,6 +28,8 @@ Preferences preferences;
 volatile bool emergencyStop = false;
 volatile bool paused = false;
 //NOTE: nema17 RPM range 100-500 == 600us delay (could have sworn I've gone to 200-300us..)
+//Minimum delay, unloaded is 80 us; way faster than the alleged 100-500 as described online. 
+//80us = 12500 steps/sec = 3.75k RPM
 // **Persistent Data: Backlash, Position, Resolution, Soft Limits**
 int backlashSteps[MOTOR_COUNT] = {5, 3, 4};
 int motorVelocities[MOTOR_COUNT] = {500,400,300};
@@ -84,83 +86,89 @@ const char webpage[] PROGMEM = R"rawliteral(
     <div>
         <button onclick="setMotorState(1, 1)">Enable Motor 1</button>
         <button onclick="setMotorState(1, 0)">Disable Motor 1</button><br>
-        <label> resolution <input type="number" id="res1"> <select id="unit1">
-            <option value="degrees">Degrees</option>
-            <option value="mm">Millimeters</option>
-        </select></label>
+        <label> resolution <input type="number" id="res1" oninput="saveInput(1, 'res')"> 
+            <select id="unit1" onchange="saveInput(1, 'unit')">
+                <option value="degrees">Degrees</option>
+                <option value="mm">Millimeters</option>
+            </select>
+        </label>
         <button onclick="setResolution(1)">Set</button><br>
-        <label> Pos Limit <input type="number" id="posLimit1"></label>
-        <label> Neg Limit <input type="number" id="negLimit1"></label>
+        <label> Pos Limit <input type="number" id="posLimit1" oninput="saveInput(1, 'posLimit')"></label>
+        <label> Neg Limit <input type="number" id="negLimit1" oninput="saveInput(1, 'negLimit')"></label>
         <button onclick="setSoftLimits(1)">Set</button><br>
-        <label> velocity (steps/sec) <input type="number" id="velo1"></label>
+        <label> velocity (steps/sec) <input type="number" id="velo1" oninput="saveInput(1, 'velo')"></label>
         <button onclick="setVelocity(1)">Set</button><br>
-        <label> acceleration (ms) <input type="number" id="accel1"></label>
+        <label> acceleration (s) <input type="number" id="accel1" oninput="saveInput(1, 'accel')"></label>
         <button onclick="setAcceleration(1)">Set</button><br>
-        <label> backlash (steps) <input type="number" id="backlsh1"></label>
+        <label> backlash (steps) <input type="number" id="backlsh1" oninput="saveInput(1, 'backlsh')"></label>
         <button onclick="setBacklash(1)">Set</button><br>
     </div>
 
-
     <h3>Motor 2 settings</h3>
+    <div>
         <button onclick="setMotorState(2, 1)">Enable Motor 2</button>
         <button onclick="setMotorState(2, 0)">Disable Motor 2</button><br>
-        <label> resolution <input type="number" id="res2"> <select id="unit2">
-            <option value="degrees">Degrees</option>
-            <option value="mm">Millimeters</option>
-        </select></label>
+        <label> resolution <input type="number" id="res2" oninput="saveInput(2, 'res')"> 
+            <select id="unit2" onchange="saveInput(2, 'unit')">
+                <option value="degrees">Degrees</option>
+                <option value="mm">Millimeters</option>
+            </select>
+        </label>
         <button onclick="setResolution(2)">Set</button><br>
-        <label> Pos Limit <input type="number" id="posLimit2"></label>
-        <label> Neg Limit <input type="number" id="negLimit2"></label>
+        <label> Pos Limit <input type="number" id="posLimit2" oninput="saveInput(2, 'posLimit')"></label>
+        <label> Neg Limit <input type="number" id="negLimit2" oninput="saveInput(2, 'negLimit')"></label>
         <button onclick="setSoftLimits(2)">Set</button><br>
-        <label> velocity (steps/sec) <input type="number" id="velo2"></label>
+        <label> velocity (steps/sec) <input type="number" id="velo2" oninput="saveInput(2, 'velo')"></label>
         <button onclick="setVelocity(2)">Set</button><br>
-        <label> acceleration (ms) <input type="number" id="accel2"></label>
+        <label> acceleration (s) <input type="number" id="accel2" oninput="saveInput(2, 'accel')"></label>
         <button onclick="setAcceleration(2)">Set</button><br>
-        <label> backlash (steps) <input type="number" id="backlsh2"></label>
+        <label> backlash (steps) <input type="number" id="backlsh2" oninput="saveInput(2, 'backlsh')"></label>
         <button onclick="setBacklash(2)">Set</button><br>
     </div>
 
-
     <h3>Motor 3 settings</h3>
+    <div>
         <button onclick="setMotorState(3, 1)">Enable Motor 3</button>
         <button onclick="setMotorState(3, 0)">Disable Motor 3</button><br>
-        <label> resolution <input type="number" id="res3"> <select id="unit3">
-            <option value="degrees">Degrees</option>
-            <option value="mm">Millimeters</option>
-        </select></label>
+        <label> resolution <input type="number" id="res3" oninput="saveInput(3, 'res')"> 
+            <select id="unit3" onchange="saveInput(3, 'unit')">
+                <option value="degrees">Degrees</option>
+                <option value="mm">Millimeters</option>
+            </select>
+        </label>
         <button onclick="setResolution(3)">Set</button><br>
-        <label> Pos Limit <input type="number" id="posLimit3"></label>
-        <label> Neg Limit <input type="number" id="negLimit3"></label>
+        <label> Pos Limit <input type="number" id="posLimit3" oninput="saveInput(3, 'posLimit')"></label>
+        <label> Neg Limit <input type="number" id="negLimit3" oninput="saveInput(3, 'negLimit')"></label>
         <button onclick="setSoftLimits(3)">Set</button><br>
-        <label> velocity (steps/sec) <input type="number" id="velo3"></label>
+        <label> velocity (steps/sec) <input type="number" id="velo3" oninput="saveInput(3, 'velo')"></label>
         <button onclick="setVelocity(3)">Set</button><br>
-        <label> acceleration (ms) <input type="number" id="accel3"></label>
+        <label> acceleration (s) <input type="number" id="accel3" oninput="saveInput(3, 'accel')"></label>
         <button onclick="setAcceleration(3)">Set</button><br>
-        <label> backlash (steps) <input type="number" id="backlsh3"></label>
+        <label> backlash (steps) <input type="number" id="backlsh3" oninput="saveInput(3, 'backlsh')"></label>
         <button onclick="setBacklash(3)">Set</button><br>
     </div>
 
-
     <h3>Move Motors</h3>
     <div>
-        <label> <select id="dir1">
+        <label> <select id="dir1" onchange="saveInput(1, 'dir')">
             <option value="F">Forward</option>
             <option value="B">Backward</option>
-        </select> Steps: <input type="number" id="steps1">
+        </select> Steps: <input type="number" id="steps1" oninput="saveInput(1, 'steps')">
         <button onclick="moveMotor(1)">Move</button><br>
 
-        <label> <select id="dir2">
+        <label> <select id="dir2" onchange="saveInput(2, 'dir')">
             <option value="F">Forward</option>
             <option value="B">Backward</option>
-        </select> Steps: <input type="number" id="steps2">
+        </select> Steps: <input type="number" id="steps2" oninput="saveInput(2, 'steps')">
         <button onclick="moveMotor(2)">Move</button><br>
 
-        <label> <select id="dir3">
+        <label> <select id="dir3" onchange="saveInput(3, 'dir')">
             <option value="F">Forward</option>
             <option value="B">Backward</option>
-        </select> Steps: <input type="number" id="steps3">
+        </select> Steps: <input type="number" id="steps3" oninput="saveInput(3, 'steps')">
         <button onclick="moveMotor(3)">Move</button><br>
     </div>
+
 
     <h3>Manual Command</h3>
     <div>
@@ -176,6 +184,30 @@ const char webpage[] PROGMEM = R"rawliteral(
     <div id="positions"></div>
 
     <script>
+
+
+        document.addEventListener("DOMContentLoaded", function () {
+            [1, 2, 3].forEach(motor => loadInputs(motor)); // Load settings for all motors
+        });
+
+        function saveInput(motor, field) {
+            let value = document.getElementById(field + motor).value;
+            localStorage.setItem(field + motor, value);
+        }
+
+        function loadInputs(motor) {
+            const fields = ["res", "unit", "posLimit", "negLimit", "velo", "accel", "backlsh", "dir", "steps"];
+            fields.forEach(field => {
+                let savedValue = localStorage.getItem(field + motor);
+                if (savedValue !== null) {
+                    let element = document.getElementById(field + motor);
+                    if (element) {
+                        element.value = savedValue;
+                    }
+                }
+            });
+        }
+
         function setMotorState(motor, state) {
             fetch(`/set_motor_state?motor=${motor}&state=${state}`)
                 .then(response => response.text())
@@ -235,7 +267,7 @@ const char webpage[] PROGMEM = R"rawliteral(
             let steps = document.getElementById("steps" + motor).value;
             let velo = document.getElementById("velo" + motor).value;
             let accel = document.getElementById("accel" + motor).value;
-            let command = "${motor},${dir},${steps},${velo},${accel}";
+            let command = motor + "," + dir + "," + steps + "," + velo + "," + accel;            
             fetch("/command?cmd=" + command);
         }
 
@@ -274,8 +306,8 @@ void setup() {
 
     server.on("/command", []() {
         String cmd = server.arg("cmd");
+        Serial.print(cmd);
         processCommand(cmd);
-        server.send(200, "text/plain", "Command Received: " + cmd);
     });
 
     server.on("/emergency_stop", []() {
@@ -293,7 +325,6 @@ void setup() {
         bool enableState = server.arg("state").toInt();
         if (motor >= 0 && motor < MOTOR_COUNT) {
             digitalWrite(motors[motor].enablePin, enableState ? LOW : HIGH);
-            server.send(200, "text/plain", enableState ? "Motor enabled" : "Motor disabled");
         }
     });
 
@@ -307,7 +338,6 @@ void setup() {
             unitType[motor] = unit;
             preferences.putFloat(("motor" + String(motor+1) + "_res").c_str(), res);
             preferences.putString(("motor" + String(motor+1) + "_unit").c_str(), unit);
-            server.send(200, "text/plain", "Resolution updated.");
         }
     });
 
@@ -321,7 +351,6 @@ void setup() {
             softLimitNegative[motor] = negLimit;
             preferences.putLong(("motor" + String(motor+1) + "_soft_pos").c_str(), posLimit);
             preferences.putLong(("motor" + String(motor+1) + "_soft_neg").c_str(), negLimit);
-            server.send(200, "text/plain", "Soft limits updated.");
         }
     });
 
@@ -331,7 +360,6 @@ void setup() {
         if (motor >= 0 && motor < MOTOR_COUNT) {
             backlashSteps[motor] = backlsh;
             preferences.putInt(("motor" + String(motor+1)).c_str(), backlsh);
-            server.send(200, "text/plain", "Backlash updated.");
         } else {
             server.send(400, "text/plain", "Invalid motor number.");
         }
@@ -343,7 +371,6 @@ void setup() {
         if (motor >= 0 && motor < MOTOR_COUNT) {
             motorVelocities[motor] = velo;
             preferences.putInt(("motor" + String(motor+1)).c_str(), velo);
-            server.send(200, "text/plain", "velocity updated.");
         } else {
             server.send(400, "text/plain", "Invalid motor number.");
         }
@@ -355,7 +382,6 @@ void setup() {
         if (motor >= 0 && motor < MOTOR_COUNT) {
             motorAccelerations[motor] = accel;
             preferences.putInt(("motor" + String(motor+1)).c_str(), accel);
-            server.send(200, "text/plain", "acceleration updated.");
         } else {
             server.send(400, "text/plain", "Invalid motor number.");
         }
@@ -367,7 +393,6 @@ void setup() {
         if (motor >= 0 && motor < MOTOR_COUNT) {
             motorPositions[motor] = pos;
             preferences.putLong(("motor" + String(motor+1) + "_position").c_str(), pos);
-            server.send(200, "text/plain", "Position updated.");
         }
     });
 
@@ -404,30 +429,28 @@ void processCommand(String command) {
     char direction;
     int steps;
     int velocity;
-    int accelTime;
+    float accelTime;
 
     Serial.println("Processing command: " + command); // Debugging
 
-    if (sscanf(command.c_str(), "%d,%c,%d,%d,%d", &motorNum, &direction, &steps, &velocity, &accelTime) == 5) {
-        Serial.printf("Parsed command: Motor %d, Direction %c, Steps %d, Velocity %d, Accel %d\n",
+    if (sscanf(command.c_str(), "%d,%c,%d,%d,%f", &motorNum, &direction, &steps, &velocity, &accelTime) == 5) {
+        Serial.printf("Parsed command: Motor %d, Direction %c, Steps %d, Velocity %d, Accel %f\n",
                       motorNum, direction, steps, velocity, accelTime);
 
         if (motorNum >= 1 && motorNum <= MOTOR_COUNT) {
             int motorIndex = motorNum - 1;
             bool newDirection = (direction == 'F' || direction == 'f');
 
-            Serial.printf("Setting Motor %d Direction: %s\n", motorNum, newDirection ? "FORWARD" : "BACKWARD");
             digitalWrite(motors[motorIndex].dirPin, newDirection ? HIGH : LOW);
 
             // Backlash Compensation
-            if (motors[motorIndex].lastDirection != newDirection) {
-                Serial.printf("Applying Backlash Compensation: %d steps\n", backlashSteps[motorIndex]);
-                moveSteps(motorIndex, backlashSteps[motorIndex], velocity);
-                moveSteps(motorIndex, -backlashSteps[motorIndex], velocity);
-            }
+            // if (motors[motorIndex].lastDirection != newDirection) {
+            //     Serial.printf("Applying Backlash Compensation: %d steps\n", backlashSteps[motorIndex]);
+            //     moveSteps(motorIndex, backlashSteps[motorIndex], velocity);
+            //     moveSteps(motorIndex, -backlashSteps[motorIndex], velocity);
+            // }
 
-            Serial.printf("Moving Motor %d: %d steps at velocity %d\n", motorNum, steps, velocity);
-            moveSteps(motorIndex, steps, velocity);
+            moveSteps(motorIndex, steps, velocity, accelTime);
 
             motors[motorIndex].targetSteps = steps;
             motors[motorIndex].currentStep = 0;
@@ -441,46 +464,100 @@ void processCommand(String command) {
     }
 }
 
-
-void moveSteps(int motorIndex, int steps, int maxSpeed) {
+void moveSteps(int motorIndex, int steps, int maxSpeed, float accelTime) {
     digitalWrite(motors[motorIndex].enablePin, LOW); // Ensure motor is enabled
     Serial.printf("Motor %d | Steps: %d | Max Speed: %d\n", motorIndex + 1, steps, maxSpeed);
 
-    int accelSteps = motors[motorIndex].accelSteps; // Acceleration step count
-    int decelSteps = accelSteps; // Deceleration step count
-    int cruiseSteps = steps - (accelSteps + decelSteps); // Remaining steps
+    // Constants
+    const int max_M = steps/2;  // Max upper limit for M
+    const double sum_constant = 2000e-6;  // 2000 * 10^-6 aboslute max delay (min speed)
+    const float min_value = 1.0/maxSpeed;  // 80 * 10^-6
+    // const double min_value = 80e-6;  // 80 * 10^-6 absolute min delay (max speed)
+    double R_target = accelTime/2;  // Desired sum target, divide by two because off by factor of 2 somehow
+        Serial.print("minDelay d: ");
+        Serial.print(min_value*1000000, 10);
+        Serial.println(" micro seconds");
+    int optimal_M = -1;
+    double optimal_t = -1.0;
+    double computed_sum = 0.0;
 
-    int minDelay = 1000000/maxSpeed;  // Fastest step delay in µs
-    int maxDelay = 2000; // Slowest step delay for acceleration start
-    int stepDelay = maxDelay; // Start slow
+    // Iterate from max_M downwards to find the largest valid M
+    for (int M = max_M; M > 0; M--) {
+        // Compute sum of i from 0 to M using formula M*(M+1)/2
+        double sum_i_part = (M * (M + 1)) / 2.0;
+        double sum_constant_part = (M + 1) * sum_constant;
 
-    Serial.printf("Motor %d | Accel: %d | Cruise: %d | Decel: %d\n", motorIndex + 1, accelSteps, cruiseSteps, decelSteps);
+        // Solve for t
+        double t_value = (sum_constant_part - R_target) / sum_i_part;
+
+        // Check minimum value constraint
+        double min_value_check = sum_constant - M * t_value;
+
+        if (t_value > 0 && min_value_check >= min_value) {
+            optimal_M = M;
+            optimal_t = t_value;
+
+            // Compute actual sum for verification
+            computed_sum = 0.0;
+            for (int i = 0; i <= M; i++) {
+                computed_sum += (sum_constant - i * optimal_t);
+            }
+            break;  // Stop once a valid M is found
+        }
+    }
+
+    // Print results
+    if (optimal_M != -1) {
+        Serial.print("Optimal t: ");
+        Serial.print(optimal_t*1000000, 10);
+        Serial.println(" micro seconds");
+
+        Serial.print("maxDelay D: ");
+        Serial.print(sum_constant*1000000, 10);
+        Serial.println(" micro seconds");
+
+        Serial.print("minDelay d: ");
+        Serial.print(min_value*1000000, 10);
+        Serial.println(" micro seconds");
+    } else {
+        Serial.println("No valid solution found.");
+    }
+    optimal_t = optimal_t*1000000;
+    double maxDelay = sum_constant*1000000; // Start slow
+    double stepDelay = maxDelay;
+    int decelSteps = optimal_M;
+    int accelSteps = optimal_M;
+    int cruiseSteps = steps - (optimal_M + optimal_M); // Remaining steps
+    double minDelay = min_value*1000000;
+
+    Serial.printf("Motor %d | Accel: %d | Cruise: %d | Decel: %d | AccelTime: %f\n", motorIndex + 1, accelSteps, cruiseSteps, decelSteps, computed_sum);
 
     // **Acceleration Phase**
     for (int i = 0; i < accelSteps; i++) {
-        stepDelay = maxDelay - ((maxDelay - minDelay) * i / accelSteps); // Decrease delay
-        stepOnce(motorIndex, stepDelay);
+        // stepDelay = maxDelay - ((maxDelay - minDelay) * i / accelSteps); // Decrease delay
+        stepDelay = maxDelay - i*optimal_t; // Decrease delay
+        digitalWrite(motors[motorIndex].stepPin, HIGH);
+        delayMicroseconds(stepDelay);
+        digitalWrite(motors[motorIndex].stepPin, LOW);
+        delayMicroseconds(stepDelay);
     }
 
     // **Cruise Phase (Constant Speed)**
     for (int i = 0; i < cruiseSteps; i++) {
-        stepOnce(motorIndex, minDelay);
+        digitalWrite(motors[motorIndex].stepPin, HIGH);
+        delayMicroseconds(stepDelay);
+        digitalWrite(motors[motorIndex].stepPin, LOW);
+        delayMicroseconds(stepDelay);
     }
-
+    
     // **Deceleration Phase**
     for (int i = 0; i < decelSteps; i++) {
-        stepDelay = minDelay + ((maxDelay - minDelay) * i / decelSteps); // Increase delay
-        stepOnce(motorIndex, stepDelay);
+        // stepDelay = minDelay + ((maxDelay - minDelay) * i / decelSteps); // Increase delay
+        stepDelay = minDelay + i*optimal_t; // Increase delay
+        digitalWrite(motors[motorIndex].stepPin, HIGH);
+        delayMicroseconds(stepDelay);
+        digitalWrite(motors[motorIndex].stepPin, LOW);
+        delayMicroseconds(stepDelay);
     }
-
     Serial.printf("Motor %d Movement Complete\n", motorIndex + 1);
-}
-
-// **Single Step Function (Helper)**
-void stepOnce(int motorIndex, int delayTime) {
-    Serial.printf("Stepping Motor %d | Delay: %d µs\n", motorIndex + 1, delayTime);
-    digitalWrite(motors[motorIndex].stepPin, HIGH);
-    delayMicroseconds(delayTime);
-    digitalWrite(motors[motorIndex].stepPin, LOW);
-    delayMicroseconds(delayTime);
 }

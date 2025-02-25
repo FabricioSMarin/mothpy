@@ -199,8 +199,12 @@ void moveSteps(int motorIndex, int steps, int maxSpeed) {
 
     // **Cruise Phase (Constant Speed)**
     for (int i = 0; i < cruiseSteps; i++) {
-        stepOnce(motorIndex, minDelay);
+        digitalWrite(motors[motorIndex].stepPin, HIGH);
+        delayMicroseconds(stepDelay);
+        digitalWrite(motors[motorIndex].stepPin, LOW);
+        delayMicroseconds(stepDelay);
     }
+
 
     // **Deceleration Phase**
     for (int i = 0; i < decelSteps; i++) {
