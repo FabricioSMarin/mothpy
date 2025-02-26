@@ -19,7 +19,7 @@ from skimage.transform import resize
 #TODO: connect track button to motor functions 
 #TODO: enable roi draging 
 #TODO: [] to resize ROI 
-#TODO: mirror roi ro zoom view
+#DONE: mirror roi ro zoom view
 #TODO: import gigE.py
 #TODO: import motors.py 
 #TODO: add step_size_changed
@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
 
 
     def load_image(self):
-        file = "/Users/marinf/Downloads/DSC08280.JPG"
+        file = "/Users/marinf/Downloads/IMG_0139.jpg"
         img = imageio.v3.imread(file)
         self.view.image_view.setImage(img)
 

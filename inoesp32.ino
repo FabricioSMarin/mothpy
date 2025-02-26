@@ -31,14 +31,14 @@ volatile bool paused = false;
 //Minimum delay, unloaded is 80 us; way faster than the alleged 100-500 as described online. 
 //80us = 12500 steps/sec = 3.75k RPM
 // **Persistent Data: Backlash, Position, Resolution, Soft Limits**
-int backlashSteps[MOTOR_COUNT] = {5, 3, 4};
-int motorVelocities[MOTOR_COUNT] = {500,400,300};
-int motorAccelerations[MOTOR_COUNT] = {300,200,100};
-long motorPositions[MOTOR_COUNT] = {0, 0, 0};
-long softLimitPositive[MOTOR_COUNT] = {10000, 10000, 10000};
-long softLimitNegative[MOTOR_COUNT] = {-10000, -10000, -10000};
+int backlashSteps[MOTOR_COUNT] = {10, 10, 10}; //steps
+int motorVelocities[MOTOR_COUNT] = {12500,12500,12500}; //steps/sec
+int motorAccelerations[MOTOR_COUNT] = {1,1,1}; //seconds
+long motorPositions[MOTOR_COUNT] = {0, 0, 0}; //steps
+long softLimitPositive[MOTOR_COUNT] = {10000, 10000, 10000}; //steps
+long softLimitNegative[MOTOR_COUNT] = {-10000, -10000, -10000}; //steps
 float stepsPerUnit[MOTOR_COUNT] = {200.0, 200.0, 200.0}; // Steps per degree/mm
-String unitType[MOTOR_COUNT] = {"degrees", "degrees", "degrees"};
+String unitType[MOTOR_COUNT] = {"degrees", "degrees", "degrees"}; 
 
 
 // **Stepper Motor Struct**
@@ -61,11 +61,6 @@ StepperMotor motors[MOTOR_COUNT] = {
     {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, 0, 0, 0, 0, 0, false, true},
     {STEP_PIN_3, DIR_PIN_3, ENABLE_PIN_3, 0, 0, 0, 0, 0, false, true}
 };
-
-
-//TODO: change MOVE MOTOR function to sendCommand example below
-//   <button onclick="sendCommand('1,B,2000,500,300')">Move Motor 1 Backward</button><br>
-//    <button onclick="sendCommand('2,F,1500,700,400')">Move Motor 2 Forward</button>
 
 // **Web Interface**
 const char webpage[] PROGMEM = R"rawliteral(
@@ -423,7 +418,6 @@ void loop() {
     }
 }
 
-
 void processCommand(String command) {
     int motorNum;
     char direction;
@@ -443,11 +437,11 @@ void processCommand(String command) {
 
             digitalWrite(motors[motorIndex].dirPin, newDirection ? HIGH : LOW);
 
-            // Backlash Compensation
+            // // Backlash Compensation
             // if (motors[motorIndex].lastDirection != newDirection) {
             //     Serial.printf("Applying Backlash Compensation: %d steps\n", backlashSteps[motorIndex]);
-            //     moveSteps(motorIndex, backlashSteps[motorIndex], velocity);
-            //     moveSteps(motorIndex, -backlashSteps[motorIndex], velocity);
+            //     moveSteps(motorIndex, backlashSteps[motorIndex], 500, accelTime);
+            //     moveSteps(motorIndex, -backlashSteps[motorIndex], 500, accelTime);
             // }
 
             moveSteps(motorIndex, steps, velocity, accelTime);
