@@ -1,16 +1,23 @@
 ########### DONE ############
-blackfly gigE python control 
 stepper motor python control
 ESP32/arduino motor control 
 pyqt gui 
-
-purchase C-A moount adpater
-########### Not Done ############
-3D print miter gear and pinion gear 250-300 mm pitch, 20-45 degree contact, module 2, material: nylon
-3D print metal hardware base/bevel gear. 
-3D print (optional?) base platform.
-3D print C-E mount adapter (experimental)
 3D print camera platform with counterwheight thruhole. 
+3D print gears/worm. 
+purchase C-A moount adpater
+
+########### Not Done ############
 3D print driver enclosure with power switch.
 3D print lens gripper (for GigE) 
+
+add serial-esp32 communication to gui
+add network-esp32 communication to gui
+add communication selector under menubar-->settings
+
+blackfly gigE python control 
+If PySpin not installed, stream images from host computer (with PySPin) or save to nertwork drive.
+
+implement tracking functionality 
+add trajectory plotting below zoom views
+
 
