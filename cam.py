@@ -16,7 +16,7 @@ class Controls(QWidget):
         edit_width = 150
 
         # Connect button
-        self.connect_button = QPushButton("Connect")
+        self.connect_button = QPushButton("Connect camera")
         self.layout.addWidget(self.connect_button)
 
         # Exposure Time row
