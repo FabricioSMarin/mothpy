@@ -414,7 +414,10 @@ void loop() {
     if (Serial.available()) {
         String command = Serial.readStringUntil('\n');
         command.trim();
-        processCommand(command);
+        if command=="Hello":
+            Serial.print("Hi");
+        else:
+            processCommand(command);
     }
 }
 

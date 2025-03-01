@@ -16,8 +16,12 @@ class Controls(QWidget):
         edit_width = 150
 
         # Connect button
-        self.connect_button = QPushButton("Connect camera")
-        self.layout.addWidget(self.connect_button)
+        connection_layout = QHBoxLayout()
+        self.connect_camera = QPushButton("Connect")
+        self.connect_status = QLabel("Disconnected")
+        connection_layout.addWidget(self.connect_camera)
+        connection_layout.addWidget(self.connect_status)
+        self.layout.addLayout(connection_layout)
 
         # Exposure Time row
         exposure_layout = QHBoxLayout()

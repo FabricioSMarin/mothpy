@@ -1,15 +1,22 @@
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy
 from PyQt5.QtCore import Qt, QSettings
 import sys
+import serial
+import time
 from motor import MotorSettings
 from cam import Controls
 from dpad import DPad
 from visuals import ImagePlotWidget
+import numpy as np
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = QSettings("Auranox", "Mothpy")  # Unique organization/app name
+        self.esp32_connected = False
+        self.trajectory = np.zeros(3,10000)
+        self.tracked_points = 0
         self.initUI()
         self.loadSettings()
 
@@ -125,6 +132,111 @@ class MainWindow(QMainWindow):
 
         # Adjust the window height dynamically
         self.resize(self.width(), total_height )  # Add padding
+
+    def connect_ESP(self):
+        # Replace with the correct port (e.g., "COM3" for Windows, "/dev/ttyUSB0" for Linux/Mac)
+        SERIAL_PORT = "/dev/ttyUSB0"  
+        BAUD_RATE = 115200  # Default ESP32 baud rate
+        self.esp32 = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+        time.sleep(2)
+        self.esp32.write(b'Hello\n')
+        time.sleep(2)
+        response = self.esp32.readline().decode().strip()
+        if response == "Hi":
+            self.esp32_connected = True
+            self.camera_controls.connect_status.setText("Connected")
+        else: 
+            self.esp32_connected = False
+            self.camera_controls.connect_status.setText("Disconnected")
+
+    def check_esp_connection(self):
+        if self.esp32.is_open():
+            self.esp32_connected=True
+        else:
+            self.esp32_connected=False
+
+    def connect_camera(self):
+        pass
+
+    def up_clickecd(self):
+        resolition,velocity,acceltime,backlash = self.get_settings(self.motor1)
+        steps = self.dpad.ud_lineedit.text()
+        motor="1"
+        direction= "1"
+        command ="{motor},{resolution},{direction},{steps},{velocity},{acceltime},{backlash}\n"
+        self.esp32.write(command.encode())
+        
+
+    def down_clicked(self):
+        resolition,velocity,acceltime,backlash = self.get_settings(self.motor1)
+        steps = self.dpad.ud_lineedit.text()
+        motor="1"
+        direction="0"
+        command ="{motor},{resolution},{direction},{steps},{velocity},{acceltime},{backlash}\n"
+        self.esp32.write(command.encode())
+
+    def left_clicked(self):
+        resolition,velocity,acceltime,backlash = self.get_settings(self.motor2)
+        steps = self.dpad.lr_lineedit.text()
+        motor="2"
+        direction="0"
+        command ="{motor},{resolution},{direction},{steps},{velocity},{acceltime},{backlash}\n"
+        self.esp32.write(command.encode())
+
+    def right_clicked(self):
+        resolition,velocity,acceltime,backlash = self.get_settings(self.motor2)
+        steps = self.dpad.lr_lineedit.text()
+        motor="2"
+        direction="1"
+        command ="{motor},{resolution},{direction},{steps},{velocity},{acceltime},{backlash}\n"
+        self.esp32.write(command.encode())
+
+    def near_clicked(self):
+        resolition,velocity,acceltime,backlash = self.get_settings(self.motor3)
+        steps = self.dpad.nf_lineedit.text()
+        motor="3"
+        direction="0"
+        command ="{motor},{resolution},{direction},{steps},{velocity},{acceltime},{backlash}\n"
+        self.esp32.write(command.encode())
+
+    def far_clicked(self):
+        resolition,velocity,acceltime,backlash = self.get_settings(self.motor3)
+        steps = self.dpad.nf_lineedit.text()
+        motor="3"
+        direction="1"
+        command ="{motor},{resolution},{direction},{steps},{velocity},{acceltime},{backlash}\n"
+        self.esp32.write(command.encode())
+
+    def track_clicked(self):
+        # x,y = self.get_position()
+        #imgs = get_imgs(ROI, exposure_time, gain, num_images, update=True)
+        #for i in range (1, imgs.shape[0]):
+        #   self.tracked_points+=1
+        #   dx,dy = registration(imgs[i-1], imga[i])
+            # self.trajectory[self.tracked_points+1][0]+=self.trajectory[self.tracked_points][0]+dx
+            # self.trajectory[self.tracked_points+1][1]+=self.trajectory[self.tracked_points][1]+dy
+            # self.trajectory[self.tracked_points+1][2]+=self.trajectory[self.tracked_points][2]+time.time()
+
+        #
+        #calculate offsets, image registration
+        #build trajectory
+
+
+        #get desired_image (ROI,exposure time, gain, 1, show=True)
+        #get tracking_image (ROI,exposure time, gain, 1, show=True)
+        #calculate and append offse to trajecotry, image registration
+        #plot X vs t, y vs t, X vs Y
+
+        
+
+        #
+        pass
+
+    def get_settings(self, motor):
+        #resolutiom, steps,velocity,acceltime,backlash
+        pass
+
+    def build_trajectory(self, data_points, extrapolated_num, )
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
