@@ -15,7 +15,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = QSettings("Auranox", "Mothpy")  # Unique organization/app name
         self.esp32_connected = False
-        self.trajectory = np.zeros(3,10000)
+        self.trajectory = np.zeros((3,10000))
         self.tracked_points = 0
         self.initUI()
         self.loadSettings()
@@ -208,6 +208,7 @@ class MainWindow(QMainWindow):
         self.esp32.write(command.encode())
 
     def track_clicked(self):
+
         # x,y = self.get_position()
         #imgs = get_imgs(ROI, exposure_time, gain, num_images, update=True)
         #for i in range (1, imgs.shape[0]):
@@ -217,17 +218,20 @@ class MainWindow(QMainWindow):
             # self.trajectory[self.tracked_points+1][1]+=self.trajectory[self.tracked_points][1]+dy
             # self.trajectory[self.tracked_points+1][2]+=self.trajectory[self.tracked_points][2]+time.time()
 
-        #
-        #calculate offsets, image registration
-        #build trajectory
+        #function(t) = predict_trajectory(self.trajectory)
+
+        # while tracking.isChecked():
+            #thread_Start(period=5):
+            #
+            #get tracking_image (ROI,exposure time, gain, 1, show=False)
+            #calculate and append offse to trajecotry, image registration
 
 
-        #get desired_image (ROI,exposure time, gain, 1, show=True)
-        #get tracking_image (ROI,exposure time, gain, 1, show=True)
-        #calculate and append offse to trajecotry, image registration
+
+
+
+
         #plot X vs t, y vs t, X vs Y
-
-        
 
         #
         pass
@@ -236,7 +240,10 @@ class MainWindow(QMainWindow):
         #resolutiom, steps,velocity,acceltime,backlash
         pass
 
-    def build_trajectory(self, data_points, extrapolated_num, )
+    def predict_trajectory(self, data_points, extrapolated_num):
+
+        #given [x,y,t] build a function as a function of time that best fits the trajectory 
+        pass
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
