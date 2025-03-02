@@ -4,11 +4,12 @@ import sys
 import serial
 import time
 import numpy as np
+from scipy.optimize import curve_fit
 from motor import MotorSettings
 from cam import Controls
 from dpad import DPad
 from visuals import ImagePlotWidget
-
+import cv2
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -28,6 +29,7 @@ class MainWindow(QMainWindow):
         self.main_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
 
         # Add three instances of SimpleWidget
+        self.esp32_connect = QPushButton("connect esp32")
         self.dpad = DPad()
         self.motor1 = MotorSettings("Alt", self)
         self.motor1.setFixedWidth(300)
@@ -43,6 +45,7 @@ class MainWindow(QMainWindow):
         self.dpad.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         controols = QVBoxLayout()
+        controols.addWidget(self.esp32_connect)
         controols.addWidget(self.dpad)
         controols.addWidget(self.motor1)
         controols.addWidget(self.motor2)
@@ -59,8 +62,15 @@ class MainWindow(QMainWindow):
         central_widget.setLayout(self.main_layout)
         self.setCentralWidget(central_widget)
         self.setWindowTitle("PyQt5 Main Window with SimpleWidgets")
-        
 
+        self.esp32_connect.clicked.connect(self.connect_ESP)
+        self.dpad.up_button.clicked.connect(self.up_clicked)
+        self.dpad.down_button.clicked.connect(self.down_clicked)
+        self.dpad.left_button.clicked.connect(self.left_clicked)
+        self.dpad.right_button.clicked.connect(self.right_clicked)
+        self.dpad.near_button.clicked.connect(self.near_clicked)
+        self.dpad.far_button.clicked.connect(self.far_clicked)
+        self.dpad.track_button.clicked.connect(self.track_clicked)
 
     def closeEvent(self, event):
         """ Triggered when the window is closed, used to save settings. """
@@ -96,7 +106,6 @@ class MainWindow(QMainWindow):
         self.settings.setValue("num_images", self.camera_controls.num_images_edit.text())
         self.settings.setValue("mode", self.camera_controls.mode_combobox.currentIndex())
 
-
     def loadSettings(self):
         """ Load the QLineEdit contents from QSettings """
         self.dpad.ud_lineedit.setText(self.settings.value("ud_text", ""))
@@ -125,57 +134,20 @@ class MainWindow(QMainWindow):
         self.camera_controls.gain_edit.setText(self.settings.value("gain", ""))
         self.camera_controls.num_images_edit.setText(self.settings.value("num_images", ""))
         self.camera_controls.mode_combobox.setCurrentIndex(self.settings.value("mode", 0))
-
         
     def update_settings(self): 
         attrs = {"res":"Resolution","velo":"Velocity","acc":"Acceleration","bac":"Backlash"}
-        for motor in [self.motor1, self.motor2, self.motor3]
+        for motor in [self.motor1, self.motor2, self.motor3]:
             for attr in attrs.keys():
                 try:
-                    setattr(motor, attr, eval(fields[attrs[attr]].text())
+                    setattr(motor, attr, eval(motor.fields[attrs[attr]].text()))
                 except:
                     setattr(motor, attr, None)
-
-    def update_resolution(self, motor):
-        try:
-            setattr(motor, "res", eval(fields["Resolution"].text())
-        except:
-            setattr(motor, "res", None)
-        
-    def update_velocity(self, motor):
-        try:
-            setattr(motor, "velo", eval(fields["Velocity"].text())
-        except:
-            setattr(motor, "velo", None)
-        
-        
-    def update_acceleration(self, motor):
-        try:
-            setattr(motor, "acc", eval(fields["Acceleration"].text())
-        except:
-            setattr(motor, "acc", None)
-        
-    def update_backlash(self, motor):
-        try:
-            setattr(motor, "bac", eval(fields["Backlash"].text())
-        except:
-            setattr(motor, "bac", None)
-      
          
-    def adjust_size(self):
-        """ Dynamically resize main window based on visible widgets. """
-        total_height = 0
-        for i in range(self.main_layout.count()):
-            widget = self.main_layout.itemAt(i).widget()
-            if widget.isVisible():
-                total_height += widget.sizeHint().height()
-
-        # Adjust the window height dynamically
-        self.resize(self.width(), total_height )  # Add padding
 
     def connect_ESP(self):
         # Replace with the correct port (e.g., "COM3" for Windows, "/dev/ttyUSB0" for Linux/Mac)
-        SERIAL_PORT = "/dev/ttyUSB0"  
+        SERIAL_PORT = "/dev/cu.usbserial-0001"  
         BAUD_RATE = 115200  # Default ESP32 baud rate
         self.esp32 = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
         time.sleep(2)
@@ -197,27 +169,27 @@ class MainWindow(QMainWindow):
 
     def up_clicked(self):
         #"{motor_num},{resolution},{direction},{steps},{velocity},{acceltime},{backlash}\n"
-        command ="{1},{self.motor1.res},{1},{self.dpad.ud_lineedit.text()},{self.motor1.velo},{self.motor1.acc},{self.motor1.bac}\n" 
+        command =f"{1},{self.motor1.res},{1},{self.dpad.ud_lineedit.text()},{self.motor1.velo},{self.motor1.acc},{self.motor1.bac}\n" 
         self.esp32.write(command.encode())
 
     def down_clicked(self):
-        command ="{1},{self.motor1.res},{0},{self.dpad.ud_lineedit.text()},{self.motor1.velo},{self.motor1.acc},{self.motor1.bac}\n" 
+        command =f"{1},{self.motor1.res},{0},{self.dpad.ud_lineedit.text()},{self.motor1.velo},{self.motor1.acc},{self.motor1.bac}\n" 
         self.esp32.write(command.encode())
 
     def left_clicked(self):
-        command ="{2},{self.motor2.res},{0},{self.dpad.lr_lineedit.text()},{self.motor2.velo},{self.motor2.acc},{self.motor2.bac}\n" 
+        command =f"{2},{self.motor2.res},{0},{self.dpad.lr_lineedit.text()},{self.motor2.velo},{self.motor2.acc},{self.motor2.bac}\n" 
         self.esp32.write(command.encode())
 
     def right_clicked(self):
-        command ="{2},{self.motor2.res},{1},{self.dpad.lr_lineedit.text()},{self.motor2.velo},{self.motor2.acc},{self.motor2.bac}\n" 
+        command =f"{2},{self.motor2.res},{1},{self.dpad.lr_lineedit.text()},{self.motor2.velo},{self.motor2.acc},{self.motor2.bac}\n" 
         self.esp32.write(command.encode())
 
     def near_clicked(self):
-        command ="{3},{self.motor3.res},{0},{self.dpad.nf_lineedit.text()},{self.motor3.velo},{self.motor3.acc},{self.motor3.bac}\n" 
+        command =f"{3},{self.motor3.res},{0},{self.dpad.nf_lineedit.text()},{self.motor3.velo},{self.motor3.acc},{self.motor3.bac}\n" 
         self.esp32.write(command.encode())
 
     def far_clicked(self):
-        command ="{3},{self.motor3.res},{1},{self.dpad.nf_lineedit.text()},{self.motor3.velo},{self.motor3.acc},{self.motor3.bac}\n" 
+        command =f"{3},{self.motor3.res},{1},{self.dpad.nf_lineedit.text()},{self.motor3.velo},{self.motor3.acc},{self.motor3.bac}\n" 
         self.esp32.write(command.encode())
 
     def track_clicked(self):
@@ -236,6 +208,7 @@ class MainWindow(QMainWindow):
         #t_overhead = 0.5 
         #x,y = predict(t_overhead+time.time()-t0) 
         #command ="{1},{200},{x>1?1:0},{abs(x)},{300},{0},{backlash}\n"
+        # self.esp32.write(command.encode())
 
         # while tracking.isChecked():
             #start_thread(period=5):
@@ -252,18 +225,67 @@ class MainWindow(QMainWindow):
         #TODO: 
         pass
 
-    def predict_trajectory(self, data_points, extrapolated_num):
 
-        #TODO: given [x,y,t] build a function as a function of time that best fits the trajectory 
-        pass
-        
+    def best_fit_curve(x, y, t, degree=2):
+        """
+        Create a best fit curve function given arrays of x positions, y positions, and time t.
+
+        Parameters:
+            x (array-like): Array of x positions.
+            y (array-like): Array of y positions.
+            t (array-like): Time array corresponding to x and y positions.
+            degree (int): Degree of the polynomial fit (default is 2 for quadratic).
+
+        Returns:
+            tuple: Two functions (fx, fy) that predict x and y positions given time.
+        """
+        # Fit polynomial to x(t) and y(t)
+        x_coeffs = np.polyfit(t, x, degree)
+        y_coeffs = np.polyfit(t, y, degree)
+
+        # Create polynomial functions
+        fx = np.poly1d(x_coeffs)
+        fy = np.poly1d(y_coeffs)
+
+
+        # fx, fy = best_fit_curve(x_data, y_data, t_data)
+
+        # # Predict positions at t=2.5
+        # t_test = 2.5
+        # print("Predicted x:", fx(t_test))
+        # print("Predicted y:", fy(t_test))
+
+        return fx, fy
+            
     def check_idle(self, period=600):
         #TODO: if no motion command has been issued in the last 10 minutes, disable motors
         pass
-        
-    def send_ascii_art(self,img):
-        #TODO: send ascii representation of the live image resized to 30x30
-        pass
+
+    def image_to_ascii(self, image_path):
+        ASCII_CHARS = "@%#*+=-:. "
+        # Load image using OpenCV
+        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("Could not load image. Check the path.")
+
+        # Convert to grayscale if it is RGB
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Resize to 30x30
+        resized_image = cv2.resize(gray_image, (30, 30), interpolation=cv2.INTER_AREA)
+
+        # Normalize pixel values to the range of ASCII characters
+        ascii_str = ""
+        for row in resized_image:
+            for pixel in row:
+                ascii_str += ASCII_CHARS[pixel // 32]  # Map grayscale value to ASCII character
+            ascii_str += "\n"
+
+        # # Example Usage
+        # ascii_art = image_to_ascii("example.jpg")
+        # print(ascii_art)
+
+        return ascii_str
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

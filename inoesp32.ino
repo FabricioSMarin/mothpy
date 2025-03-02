@@ -33,11 +33,11 @@ volatile bool paused = false;
 // **Persistent Data: Backlash, Position, Resolution, Soft Limits**
 int backlashSteps[MOTOR_COUNT] = {10, 10, 10}; //steps
 int motorVelocities[MOTOR_COUNT] = {12500,12500,12500}; //steps/sec
-int motorAccelerations[MOTOR_COUNT] = {1,1,1}; //seconds
+float motorAccelerations[MOTOR_COUNT] = {1.0,1.0,1.0}; //seconds
 long motorPositions[MOTOR_COUNT] = {0, 0, 0}; //steps
-long softLimitPositive[MOTOR_COUNT] = {10000, 10000, 10000}; //steps
-long softLimitNegative[MOTOR_COUNT] = {-10000, -10000, -10000}; //steps
-float stepsPerUnit[MOTOR_COUNT] = {200.0, 200.0, 200.0}; // Steps per degree/mm
+long softLimitPositive[MOTOR_COUNT] = {1000000, 1000000, 1000000}; //steps
+long softLimitNegative[MOTOR_COUNT] = {-1000000, -1000000, -1000000}; //steps
+int stepsPerUnit[MOTOR_COUNT] = {200, 200, 200}; // Steps per degree/mm
 String unitType[MOTOR_COUNT] = {"degrees", "degrees", "degrees"}; 
 
 
@@ -46,20 +46,21 @@ struct StepperMotor {
     int stepPin;
     int dirPin;
     int enablePin;
-    int targetSteps;
-    int currentStep;
-    int stepDelay;
     int velocity;
-    int accelSteps;
+    float accelTime;
+    int backlash;
+    int nlim;
+    int plim;
+    int position;
     bool active;
     bool lastDirection;  // Stores the last direction (true = forward, false = backward)
 };
 // **Motor Definitions**
 // Define Motors
 StepperMotor motors[MOTOR_COUNT] = {
-    {STEP_PIN_1, DIR_PIN_1, ENABLE_PIN_1, 0, 0, 0, 0, 0, false, true},
-    {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, 0, 0, 0, 0, 0, false, true},
-    {STEP_PIN_3, DIR_PIN_3, ENABLE_PIN_3, 0, 0, 0, 0, 0, false, true}
+    {STEP_PIN_1, DIR_PIN_1, ENABLE_PIN_1, 10000, 1.0, 0, -1000000, 1000000, 0, false, true},
+    {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, 10000, 1.0, 0, -1000000, 1000000, 0, false, true},
+    {STEP_PIN_3, DIR_PIN_3, ENABLE_PIN_3, 10000, 1.0, 0, -1000000, 1000000, 0, false, true}
 };
 
 // **Web Interface**
@@ -291,7 +292,7 @@ void setup() {
     
     preferences.begin("backlash", false);
     for (int i = 0; i < MOTOR_COUNT; i++) {
-        backlashSteps[i] = preferences.getInt(("motor" + String(i+1)).c_str(), backlashSteps[i]);
+        motors[i].backlash = preferences.getInt(("motor" + String(i+1)).c_str(), motors[i].backlash);
     }
     
     WiFi.begin(ssid, password);
@@ -342,8 +343,8 @@ void setup() {
         long negLimit = server.arg("negLimit").toInt();
 
         if (motor >= 0 && motor < MOTOR_COUNT) {
-            softLimitPositive[motor] = posLimit;
-            softLimitNegative[motor] = negLimit;
+            motors[motor].plim = posLimit;
+            motors[motor].nlim = negLimit;
             preferences.putLong(("motor" + String(motor+1) + "_soft_pos").c_str(), posLimit);
             preferences.putLong(("motor" + String(motor+1) + "_soft_neg").c_str(), negLimit);
         }
@@ -353,7 +354,7 @@ void setup() {
         int motor = server.arg("motor").toInt() - 1;
         int backlsh = server.arg("backlsh").toInt();
         if (motor >= 0 && motor < MOTOR_COUNT) {
-            backlashSteps[motor] = backlsh;
+            motors[motor].backlash = backlsh;
             preferences.putInt(("motor" + String(motor+1)).c_str(), backlsh);
         } else {
             server.send(400, "text/plain", "Invalid motor number.");
@@ -364,7 +365,7 @@ void setup() {
         int motor = server.arg("motor").toInt() - 1;
         int velo = server.arg("velo").toInt();
         if (motor >= 0 && motor < MOTOR_COUNT) {
-            motorVelocities[motor] = velo;
+            motors[motor].velocity = velo;
             preferences.putInt(("motor" + String(motor+1)).c_str(), velo);
         } else {
             server.send(400, "text/plain", "Invalid motor number.");
@@ -372,22 +373,22 @@ void setup() {
     });
 
     server.on("/set_acceleration", []() {
-        int motor = server.arg("motor").toInt() - 1;
+        int motorIndex = server.arg("motor").toInt() - 1;
         int accel = server.arg("accel").toInt();
-        if (motor >= 0 && motor < MOTOR_COUNT) {
-            motorAccelerations[motor] = accel;
-            preferences.putInt(("motor" + String(motor+1)).c_str(), accel);
+        if (motorIndex >= 0 && motorIndex < MOTOR_COUNT) {
+            motors[motorIndex].accelTime = accel;
+            preferences.putInt(("motor" + String(motorIndex+1)).c_str(), accel);
         } else {
             server.send(400, "text/plain", "Invalid motor number.");
         }
     });
 
     server.on("/set_position", []() {
-        int motor = server.arg("motor").toInt() - 1;
+        int motorIndex = server.arg("motor").toInt() - 1;
         long pos = server.arg("pos").toInt();
-        if (motor >= 0 && motor < MOTOR_COUNT) {
-            motorPositions[motor] = pos;
-            preferences.putLong(("motor" + String(motor+1) + "_position").c_str(), pos);
+        if (motorIndex >= 0 && motorIndex < MOTOR_COUNT) {
+            motorPositions[motorIndex] = pos;
+            preferences.putLong(("motor" + String(motorIndex+1) + "_position").c_str(), pos);
         }
     });
 
@@ -413,11 +414,95 @@ void loop() {
     server.handleClient();
     if (Serial.available()) {
         String command = Serial.readStringUntil('\n');
-        command.trim();
-        if command=="Hello":
+        int separatorIndex = command.indexOf(':');
+
+
+        if (command=="Hello") {
             Serial.print("Hi");
-        else:
-            processCommand(command);
+
+        if (separatorIndex != -1) {  // Ensure ":" exists in the string
+            String key = command.substring(0, separatorIndex);
+            String value = command.substring(separatorIndex + 1);
+            
+            key.trim();  // Remove spaces
+            value.trim();
+
+            if (key == "set_resolution") {
+                int commaIndex = value.indexOf(',');
+                if (commaIndex != -1) {  // Ensure there is a comma
+                    String motor = value.substring(0, commaIndex);
+                    String resolution = value.substring(commaIndex + 1);
+
+                    motor.trim();
+                    resolution.trim();
+
+                    int motorIndex = motor.toInt();  // Convert to integer
+                    int res = resolution.toInt();  // Convert to integer
+                    Serial.print("Motor ");
+                    Serial.print(motorIndex);
+                    Serial.print(" resolution set to ");
+                    Serial.println(res);
+
+                    if (motorIndex >= 0 && motorIndex < MOTOR_COUNT) {
+                        stepsPerUnit[motorIndex] = res;
+                        // unitType[motor] = unit;
+                        preferences.putFloat(("motor" + String(motorIndex+1) + "_res").c_str(), res);
+                        // preferences.putString(("motor" + String(motor+1) + "_unit").c_str(), unit);
+                    }
+                }
+
+            } else if (key == "set_acceleration") {
+                int commaIndex = value.indexOf(',');
+                if (commaIndex != -1) {  // Ensure there is a comma
+                    String motor = value.substring(0, commaIndex);
+                    String acceleration = value.substring(commaIndex + 1);
+
+                    motor.trim();
+                    acceleration.trim();
+
+                    int motorIndex = motor.toInt();  // Convert to integer
+                    int acc = acceleration.toInt();  // Convert to integer
+                    Serial.print("Motor ");
+                    Serial.print(motor);
+                    Serial.print(" accleration set to ");
+                    Serial.println(acc);
+
+                    if (motorIndex >= 0 && motorIndex < MOTOR_COUNT) {
+                        motors[motorIndex].accelTime = acc;
+                        // unitType[motor] = unit;
+                        preferences.putInt(("motor" + String(motorIndex+1)).c_str(), acc);
+                    }
+                }
+            } else if (key == "set_backlash") {
+                int commaIndex = value.indexOf(',');
+                if (commaIndex != -1) {  // Ensure there is a comma
+                    String motor = value.substring(0, commaIndex);
+                    String backlash = value.substring(commaIndex + 1);
+
+                    motor.trim();
+                    backlash.trim();
+
+                    int motorIndex = motor.toInt();  // Convert to integer
+                    int bac = backlash.toInt();  // Convert to integer
+                    Serial.print("Motor ");
+                    Serial.print(motorIndex);
+                    Serial.print(" backlash set to ");
+                    Serial.println(bac);
+
+                    if (motorIndex >= 0 && motorIndex < MOTOR_COUNT) {
+                        motors[motorIndex].accelTime = bac;
+                        // unitType[motor] = unit;
+                        preferences.putInt(("motor" + String(motorIndex+1)).c_str(), bac);
+                    }
+                
+            } else if (key == "move") {
+                    processCommand(value);
+                    }
+            } else
+                Serial.print("Invalid command");
+                
+            }
+        }       
     }
 }
 
@@ -425,17 +510,19 @@ void processCommand(String command) {
     int motorNum;
     char direction;
     int steps;
-    int velocity;
-    float accelTime;
+    // int velocity;
+    // float accelTime;
 
     Serial.println("Processing command: " + command); // Debugging
 
-    if (sscanf(command.c_str(), "%d,%c,%d,%d,%f", &motorNum, &direction, &steps, &velocity, &accelTime) == 5) {
-        Serial.printf("Parsed command: Motor %d, Direction %c, Steps %d, Velocity %d, Accel %f\n",
-                      motorNum, direction, steps, velocity, accelTime);
+    if (sscanf(command.c_str(), "%d,%c,%d", &motorNum, &direction, &steps) == 3) {
+        Serial.printf("Parsed command: Motor %d, Direction %c, Steps %d\n",
+                      motorNum, direction, steps);
 
         if (motorNum >= 1 && motorNum <= MOTOR_COUNT) {
             int motorIndex = motorNum - 1;
+            int velo = motors[motorIndex].velocity;
+            float acc = motors[motorIndex].accelTime;
             bool newDirection = (direction == 'F' || direction == 'f');
 
             digitalWrite(motors[motorIndex].dirPin, newDirection ? HIGH : LOW);
@@ -447,12 +534,8 @@ void processCommand(String command) {
             //     moveSteps(motorIndex, -backlashSteps[motorIndex], 500, accelTime);
             // }
 
-            moveSteps(motorIndex, steps, velocity, accelTime);
+            moveSteps(motorIndex, steps, velo, acc);
 
-            motors[motorIndex].targetSteps = steps;
-            motors[motorIndex].currentStep = 0;
-            motors[motorIndex].velocity = velocity;
-            motors[motorIndex].accelSteps = (steps / 2 < (velocity * accelTime / 1000)) ? steps / 2 : (velocity * accelTime / 1000);
             motors[motorIndex].active = true;
             motors[motorIndex].lastDirection = newDirection;
         }

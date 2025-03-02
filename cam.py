@@ -17,7 +17,7 @@ class Controls(QWidget):
 
         # Connect button
         connection_layout = QHBoxLayout()
-        self.connect_camera = QPushButton("Connect")
+        self.connect_camera = QPushButton("Connect Camera")
         self.connect_status = QLabel("Disconnected")
         connection_layout.addWidget(self.connect_camera)
         connection_layout.addWidget(self.connect_status)
@@ -74,3 +74,4 @@ class Controls(QWidget):
 
     def toggle_start_stop(self, checked):
         self.start_stop_button.setText("Stop" if checked else "Start")
+        self.mode_combobox.setEnabled(False if checked else True)

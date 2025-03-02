@@ -32,21 +32,21 @@ class DPad(QWidget):
         for button in [self.up_button, self.down_button, self.left_button, self.right_button, self.near_button, self.far_button]:
             button.setFixedSize(button_width, button_height)
 
-        # Center button (toggleable)
-        self.center_button = QPushButton()
-        self.center_button.setCheckable(True)
-        self.center_button.setStyleSheet(
+        # track button (toggleable)
+        self.track_button = QPushButton()
+        self.track_button.setCheckable(True)
+        self.track_button.setStyleSheet(
             "border-radius: 25px; background-color: gray;"
             "border: 5px solid transparent;"
         )
-        self.center_button.setFixedSize(button_height, button_height)  # Keep center button square
-        self.center_button.clicked.connect(self.toggle_center_button)
-        self.center_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.track_button.setFixedSize(button_height, button_height)  # Keep center button square
+        self.track_button.clicked.connect(self.toggle_track_button)
+        self.track_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         # Grid structure:
         dpad_layout.addWidget(self.up_button, 0, 1, alignment=Qt.AlignCenter)
         dpad_layout.addWidget(self.left_button, 1, 0, alignment=Qt.AlignCenter)
-        dpad_layout.addWidget(self.center_button, 1, 1, alignment=Qt.AlignCenter)
+        dpad_layout.addWidget(self.track_button, 1, 1, alignment=Qt.AlignCenter)
         dpad_layout.addWidget(self.right_button, 1, 2, alignment=Qt.AlignCenter)
 
         # Add "Down" button in its usual place
@@ -91,14 +91,14 @@ class DPad(QWidget):
 
         return self.layout
     
-    def toggle_center_button(self):
-        if self.center_button.isChecked():
-            self.center_button.setStyleSheet(
+    def toggle_track_button(self):
+        if self.track_button.isChecked():
+            self.track_button.setStyleSheet(
                 "border-radius: 25px; background-color: gray;"
                 "border: 5px solid green;"
             )
         else:
-            self.center_button.setStyleSheet(
+            self.track_button.setStyleSheet(
                 "border-radius: 25px; background-color: gray;"
                 "border: 5px solid transparent;"
             )

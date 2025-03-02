@@ -14,7 +14,6 @@ class MotorSettings(QWidget):
         # Toggle button
         self.toggle_button = QPushButton(self.title)
         self.toggle_button.setCheckable(True)
-        self.toggle_button.toggled.connect(self.toggle_fields)
         self.main_layout.addWidget(self.toggle_button)
         
         # Widget container for collapsible section
@@ -38,10 +37,15 @@ class MotorSettings(QWidget):
             self.fields_layout.addLayout(row_layout)
         
         self.main_layout.addWidget(self.container)
-        
         self.setLayout(self.main_layout)
         self.setWindowTitle("Collapsible PyQt5 Widget")
         # self.setGeometry(100, 100, 300, 200)
+
+        self.toggle_button.toggled.connect(self.toggle_fields)
+        self.fields["Resolution"].editingFinished.connect(self.update_resolution)
+        self.fields["Velocity"].editingFinished.connect(self.update_velocity)
+        self.fields["Acceleration"].editingFinished.connect(self.update_acceleration)
+        self.fields["Backlash"].editingFinished.connect(self.update_backlash)
 
         return self.main_layout
 
@@ -61,5 +65,49 @@ class MotorSettings(QWidget):
 
         # Notify MainWindow to adjust size
         main_window = self.window()  # Get reference to MainWindow
-        if isinstance(main_window, QMainWindow):  # Ensure it's MainWindow
-            main_window.adjust_size()
+        # if isinstance(main_window, QMainWindow):  # Ensure it's MainWindow
+        #     main_window.adjust_size()
+
+    def update_resolution(self):
+        try:
+            res = eval(self.fields["Resolution"].text())
+            if res<=0: 
+                raise Exception()
+            setattr(self, "res", )
+        except:
+            setattr(self, "res", None)
+            print("Invalid resolution")
+            self.fields["Resolution"].setText("")
+        
+    def update_velocity(self):
+        try:
+            velo = eval(self.fields["Velocity"].text())
+            if velo<=0: 
+                raise Exception()
+            setattr(self, "velo", eval(self.fields["Velocity"].text()))
+        except:
+            setattr(self, "velo", None)
+            print("Invalid velocity")
+            self.fields["Velocity"].setText("")
+
+    def update_acceleration(self):
+        try:
+            acc = eval(self.fields["Acceleration"].text())
+            if acc<=0: 
+                raise Exception()
+            setattr(self, "acc", eval(self.fields["Acceleration"].text()))
+        except:
+            setattr(self, "acc", None)
+            print("Invalid acceleration")
+            self.fields["Acceleration"].setText("")
+
+    def update_backlash(self):
+        try:
+            bac = eval(self.fields["Backlash"].text())
+            if bac <= 0: 
+                raise Exception()
+            setattr(self, "bac", eval(self.fields["Backlash"].text()))
+        except:
+            setattr(self, "bac", None)
+            print("Invalid backlash")
+            self.fields["Backlash"].setText("")
