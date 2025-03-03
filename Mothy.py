@@ -30,6 +30,7 @@ class MainWindow(QMainWindow):
 
         # Add three instances of SimpleWidget
         self.esp32_connect = QPushButton("connect esp32")
+        self.esp32_label = QLabel("Dsiconnected")
         self.dpad = DPad()
         self.motor1 = MotorSettings("Alt", self)
         self.motor1.setFixedWidth(300)
@@ -43,9 +44,11 @@ class MainWindow(QMainWindow):
 
         # Set fixed size policy to preserve geometry
         self.dpad.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
+        esp32_box = QHBoxLayout()
+        esp32_box.addWidget(self.esp32_connect)
+        esp32_box.addWidget(self.esp32_label)
         controols = QVBoxLayout()
-        controols.addWidget(self.esp32_connect)
+        controols.addLayout(esp32_box)
         controols.addWidget(self.dpad)
         controols.addWidget(self.motor1)
         controols.addWidget(self.motor2)
@@ -144,7 +147,6 @@ class MainWindow(QMainWindow):
                 except:
                     setattr(motor, attr, None)
          
-
     def connect_ESP(self):
         # Replace with the correct port (e.g., "COM3" for Windows, "/dev/ttyUSB0" for Linux/Mac)
         SERIAL_PORT = "/dev/cu.usbserial-0001"  
@@ -156,40 +158,53 @@ class MainWindow(QMainWindow):
         response = self.esp32.readline().decode().strip()
         if response == "Hi":
             self.esp32_connected = True
-            self.camera_controls.connect_status.setText("Connected")
+            self.esp32_label.setText("Connected")
+            self.send_motor_settings()
         else: 
             self.esp32_connected = False
-            self.camera_controls.connect_status.setText("Disconnected")
+            self.esp32_label.setText("Disconnected")
 
     def check_esp_connection(self):
         if self.esp32.is_open():
             self.esp32_connected=True
         else:
             self.esp32_connected=False
+            
+    def send_motor_settings(self):
+        for i, motor, in enumerate([self.motor1, self.motor2, self.motor3]):
+            cmd = f"set_backlash:{i},{motor.bac}"
+            self.esp32.write(cmd.encode())
+            time.sleep(0.1)
+            cmd = f"set_acceleration:{i},{motor.acc}"
+            self.esp32.write(cmd.encode())
+            time.sleep(0.1)
+            cmd = f"set_velocity:{i},{motor.velo}"
+            self.esp32.write(cmd.encode())
+
 
     def up_clicked(self):
-        #"{motor_num},{resolution},{direction},{steps},{velocity},{acceltime},{backlash}\n"
-        command =f"{1},{self.motor1.res},{1},{self.dpad.ud_lineedit.text()},{self.motor1.velo},{self.motor1.acc},{self.motor1.bac}\n" 
+        #"{motor_num},{direction},{steps},{velocity},{acceltime},{backlash}\n"
+        command =f"move:{1},F,{self.dpad.ud_lineedit.text()}\n"
         self.esp32.write(command.encode())
 
     def down_clicked(self):
-        command =f"{1},{self.motor1.res},{0},{self.dpad.ud_lineedit.text()},{self.motor1.velo},{self.motor1.acc},{self.motor1.bac}\n" 
+        command =f"move:{1},B,{self.dpad.ud_lineedit.text()}\n" 
         self.esp32.write(command.encode())
 
     def left_clicked(self):
-        command =f"{2},{self.motor2.res},{0},{self.dpad.lr_lineedit.text()},{self.motor2.velo},{self.motor2.acc},{self.motor2.bac}\n" 
+        command =f"move:{2},B,{self.dpad.lr_lineedit.text()}\n" 
         self.esp32.write(command.encode())
 
     def right_clicked(self):
-        command =f"{2},{self.motor2.res},{1},{self.dpad.lr_lineedit.text()},{self.motor2.velo},{self.motor2.acc},{self.motor2.bac}\n" 
+        command =f"move:{2},F,{self.dpad.lr_lineedit.text()}\n" 
         self.esp32.write(command.encode())
 
     def near_clicked(self):
-        command =f"{3},{self.motor3.res},{0},{self.dpad.nf_lineedit.text()},{self.motor3.velo},{self.motor3.acc},{self.motor3.bac}\n" 
+        command =f"move:{3},B,{self.dpad.nf_lineedit.text()}\n" 
         self.esp32.write(command.encode())
 
     def far_clicked(self):
-        command =f"{3},{self.motor3.res},{1},{self.dpad.nf_lineedit.text()},{self.motor3.velo},{self.motor3.acc},{self.motor3.bac}\n" 
+        command =f"move:{3},F,{self.dpad.nf_lineedit.text()}\n" 
         self.esp32.write(command.encode())
 
     def track_clicked(self):

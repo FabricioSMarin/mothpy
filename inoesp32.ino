@@ -3,10 +3,10 @@
 #include <Preferences.h>
 
 // WiFi Credentials
-//const char* ssid = "Marinf2.4";
-//const char* password = "3V@$!VE_Wifi2.4";
-const char* ssid = "auranox";
-const char* password = "C0ndu(tive_Wifi";
+const char* ssid = "Marinf2.4";
+const char* password = "3V@$!VE_Wifi2.4";
+// const char* ssid = "auranox";
+// const char* password = "C0ndu(tive_Wifi";
 WebServer server(80); // Add this line to declare the server instance
 Preferences preferences;
 
@@ -39,7 +39,6 @@ long softLimitPositive[MOTOR_COUNT] = {1000000, 1000000, 1000000}; //steps
 long softLimitNegative[MOTOR_COUNT] = {-1000000, -1000000, -1000000}; //steps
 int stepsPerUnit[MOTOR_COUNT] = {200, 200, 200}; // Steps per degree/mm
 String unitType[MOTOR_COUNT] = {"degrees", "degrees", "degrees"}; 
-
 
 // **Stepper Motor Struct**
 struct StepperMotor {
@@ -168,7 +167,7 @@ const char webpage[] PROGMEM = R"rawliteral(
 
     <h3>Manual Command</h3>
     <div>
-        <input type="text" id="cmd" placeholder="1,B,2000,500,300">
+        <input type="text" id="cmd" placeholder="move:1,B,2000">
         <button onclick="sendCommand()">Move Motor</button><br>
     </div>
 
@@ -263,7 +262,7 @@ const char webpage[] PROGMEM = R"rawliteral(
             let steps = document.getElementById("steps" + motor).value;
             let velo = document.getElementById("velo" + motor).value;
             let accel = document.getElementById("accel" + motor).value;
-            let command = motor + "," + dir + "," + steps + "," + velo + "," + accel;            
+            let command = "move:"motor + "," + dir + "," + steps ;            
             fetch("/command?cmd=" + command);
         }
 
@@ -399,6 +398,7 @@ void setup() {
         }
         server.send(200, "text/html", positions);
     });
+    
     server.begin();
 
     // Configure motor pins
@@ -410,20 +410,20 @@ void setup() {
     }
 }
 
+
 void loop() {
     server.handleClient();
     if (Serial.available()) {
         String command = Serial.readStringUntil('\n');
         int separatorIndex = command.indexOf(':');
 
-
         if (command=="Hello") {
             Serial.print("Hi");
+        }
 
         if (separatorIndex != -1) {  // Ensure ":" exists in the string
             String key = command.substring(0, separatorIndex);
             String value = command.substring(separatorIndex + 1);
-            
             key.trim();  // Remove spaces
             value.trim();
 
@@ -432,7 +432,6 @@ void loop() {
                 if (commaIndex != -1) {  // Ensure there is a comma
                     String motor = value.substring(0, commaIndex);
                     String resolution = value.substring(commaIndex + 1);
-
                     motor.trim();
                     resolution.trim();
 
@@ -449,14 +448,13 @@ void loop() {
                         preferences.putFloat(("motor" + String(motorIndex+1) + "_res").c_str(), res);
                         // preferences.putString(("motor" + String(motor+1) + "_unit").c_str(), unit);
                     }
-                }
+                  }
 
             } else if (key == "set_acceleration") {
                 int commaIndex = value.indexOf(',');
                 if (commaIndex != -1) {  // Ensure there is a comma
                     String motor = value.substring(0, commaIndex);
                     String acceleration = value.substring(commaIndex + 1);
-
                     motor.trim();
                     acceleration.trim();
 
@@ -472,13 +470,12 @@ void loop() {
                         // unitType[motor] = unit;
                         preferences.putInt(("motor" + String(motorIndex+1)).c_str(), acc);
                     }
-                }
+                  }
             } else if (key == "set_backlash") {
                 int commaIndex = value.indexOf(',');
                 if (commaIndex != -1) {  // Ensure there is a comma
                     String motor = value.substring(0, commaIndex);
                     String backlash = value.substring(commaIndex + 1);
-
                     motor.trim();
                     backlash.trim();
 
@@ -494,14 +491,15 @@ void loop() {
                         // unitType[motor] = unit;
                         preferences.putInt(("motor" + String(motorIndex+1)).c_str(), bac);
                     }
+                }
                 
             } else if (key == "move") {
                     processCommand(value);
-                    }
-            } else
+                  
+            } else {
                 Serial.print("Invalid command");
                 
-            }
+              }
         }       
     }
 }
@@ -510,8 +508,6 @@ void processCommand(String command) {
     int motorNum;
     char direction;
     int steps;
-    // int velocity;
-    // float accelTime;
 
     Serial.println("Processing command: " + command); // Debugging
 
@@ -522,6 +518,7 @@ void processCommand(String command) {
         if (motorNum >= 1 && motorNum <= MOTOR_COUNT) {
             int motorIndex = motorNum - 1;
             int velo = motors[motorIndex].velocity;
+            int bac = motors[motorIndex].backlash;
             float acc = motors[motorIndex].accelTime;
             bool newDirection = (direction == 'F' || direction == 'f');
 
@@ -535,7 +532,6 @@ void processCommand(String command) {
             // }
 
             moveSteps(motorIndex, steps, velo, acc);
-
             motors[motorIndex].active = true;
             motors[motorIndex].lastDirection = newDirection;
         }
@@ -546,13 +542,12 @@ void processCommand(String command) {
 
 void moveSteps(int motorIndex, int steps, int maxSpeed, float accelTime) {
     digitalWrite(motors[motorIndex].enablePin, LOW); // Ensure motor is enabled
-    Serial.printf("Motor %d | Steps: %d | Max Speed: %d\n", motorIndex + 1, steps, maxSpeed);
+    Serial.printf("Motor %d | Steps: %d | Max Speed: %d | Accel Time %f\n", motorIndex + 1, steps, maxSpeed, accelTime);
 
     // Constants
     const int max_M = steps/2;  // Max upper limit for M
     const double sum_constant = 2000e-6;  // 2000 * 10^-6 aboslute max delay (min speed)
-    const float min_value = 1.0/maxSpeed;  // 80 * 10^-6
-    // const double min_value = 80e-6;  // 80 * 10^-6 absolute min delay (max speed)
+    const float min_value = 1.0/maxSpeed;  // 80 * 10^-6 is absolute min delay (max speed)
     double R_target = accelTime/2;  // Desired sum target, divide by two because off by factor of 2 somehow
         Serial.print("minDelay d: ");
         Serial.print(min_value*1000000, 10);
@@ -560,25 +555,18 @@ void moveSteps(int motorIndex, int steps, int maxSpeed, float accelTime) {
     int optimal_M = -1;
     double optimal_t = -1.0;
     double computed_sum = 0.0;
-
-    // Iterate from max_M downwards to find the largest valid M
-    for (int M = max_M; M > 0; M--) {
-        // Compute sum of i from 0 to M using formula M*(M+1)/2
-        double sum_i_part = (M * (M + 1)) / 2.0;
+    
+    for (int M = max_M; M > 0; M--) { // Iterate from max_M downwards to find the largest valid M
+        double sum_i_part = (M * (M + 1)) / 2.0; // Compute sum of i from 0 to M using formula M*(M+1)/2
         double sum_constant_part = (M + 1) * sum_constant;
-
-        // Solve for t
-        double t_value = (sum_constant_part - R_target) / sum_i_part;
-
-        // Check minimum value constraint
-        double min_value_check = sum_constant - M * t_value;
+        double t_value = (sum_constant_part - R_target) / sum_i_part; // Solve for t
+        double min_value_check = sum_constant - M * t_value; // Check minimum value constraint
 
         if (t_value > 0 && min_value_check >= min_value) {
             optimal_M = M;
             optimal_t = t_value;
-
-            // Compute actual sum for verification
-            computed_sum = 0.0;
+            
+            computed_sum = 0.0; // Compute actual sum for verification
             for (int i = 0; i <= M; i++) {
                 computed_sum += (sum_constant - i * optimal_t);
             }
@@ -609,30 +597,25 @@ void moveSteps(int motorIndex, int steps, int maxSpeed, float accelTime) {
     int accelSteps = optimal_M;
     int cruiseSteps = steps - (optimal_M + optimal_M); // Remaining steps
     double minDelay = min_value*1000000;
-
     Serial.printf("Motor %d | Accel: %d | Cruise: %d | Decel: %d | AccelTime: %f\n", motorIndex + 1, accelSteps, cruiseSteps, decelSteps, computed_sum);
 
     // **Acceleration Phase**
     for (int i = 0; i < accelSteps; i++) {
-        // stepDelay = maxDelay - ((maxDelay - minDelay) * i / accelSteps); // Decrease delay
         stepDelay = maxDelay - i*optimal_t; // Decrease delay
         digitalWrite(motors[motorIndex].stepPin, HIGH);
         delayMicroseconds(stepDelay);
         digitalWrite(motors[motorIndex].stepPin, LOW);
         delayMicroseconds(stepDelay);
     }
-
-    // **Cruise Phase (Constant Speed)**
-    for (int i = 0; i < cruiseSteps; i++) {
+    
+    for (int i = 0; i < cruiseSteps; i++) { // **Cruise Phase (Constant Speed)**
         digitalWrite(motors[motorIndex].stepPin, HIGH);
         delayMicroseconds(stepDelay);
         digitalWrite(motors[motorIndex].stepPin, LOW);
         delayMicroseconds(stepDelay);
-    }
+    } 
     
-    // **Deceleration Phase**
-    for (int i = 0; i < decelSteps; i++) {
-        // stepDelay = minDelay + ((maxDelay - minDelay) * i / decelSteps); // Increase delay
+    for (int i = 0; i < decelSteps; i++) { // **Deceleration Phase**
         stepDelay = minDelay + i*optimal_t; // Increase delay
         digitalWrite(motors[motorIndex].stepPin, HIGH);
         delayMicroseconds(stepDelay);

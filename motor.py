@@ -73,7 +73,7 @@ class MotorSettings(QWidget):
             res = eval(self.fields["Resolution"].text())
             if res<=0: 
                 raise Exception()
-            setattr(self, "res", )
+            setattr(self, "res", res)
         except:
             setattr(self, "res", None)
             print("Invalid resolution")
