@@ -104,7 +104,7 @@ class MotorSettings(QWidget):
     def update_backlash(self):
         try:
             bac = eval(self.fields["Backlash"].text())
-            if bac <= 0: 
+            if bac < 0: 
                 raise Exception()
             setattr(self, "bac", eval(self.fields["Backlash"].text()))
         except:

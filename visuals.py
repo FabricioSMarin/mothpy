@@ -128,6 +128,10 @@ class ImagePlotWidget(QWidget):
         roi2_bounds = self.ROI2.getArraySlice(self.image_data, self.image_item)[0]
         
         if roi1_bounds is not None:
-            self.roi1_image_view.setImage(self.image_data[roi1_bounds])
+            roi1_data = self.image_data[roi1_bounds]
+            # Flip the ROI image vertically
+            self.roi1_image_view.setImage(np.fliplr(roi1_data))
         if roi2_bounds is not None:
-            self.roi2_image_view.setImage(self.image_data[roi2_bounds])
+            roi2_data = self.image_data[roi2_bounds]
+            # Flip the ROI image vertically
+            self.roi2_image_view.setImage(np.fliplr(roi2_data))

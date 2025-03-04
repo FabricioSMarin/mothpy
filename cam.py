@@ -43,35 +43,25 @@ class Controls(QWidget):
         gain_layout.addWidget(self.gain_edit)
         self.layout.addLayout(gain_layout)
 
-        # Number of images row
-        num_images_layout = QHBoxLayout()
-        num_images_label = QLabel("# images:")
-        num_images_label.setFixedWidth(label_width)
-        self.num_images_edit = QLineEdit()
-        self.num_images_edit.setFixedWidth(edit_width)
-        num_images_layout.addWidget(num_images_label)
-        num_images_layout.addWidget(self.num_images_edit)
-        self.layout.addLayout(num_images_layout)
-
+        color_mode_layout = QHBoxLayout()
+        color_mode_label = QLabel("Color Mode:")
+        color_mode_label.setFixedWidth(label_width)
+        self.color_mode_combobox = QComboBox()
+        self.color_mode_combobox.addItems(["Color", "Grayscale"])
+        color_mode_layout.addWidget(color_mode_label)
+        color_mode_layout.addWidget(self.color_mode_combobox)
+        self.layout.addLayout(color_mode_layout)
+        
         # Mode selection and start/stop button
-        mode_layout = QHBoxLayout()
-        self.mode_combobox = QComboBox()
-        self.mode_combobox.addItems(["single", "multiple", "continuous"])
+        capture_layout = QHBoxLayout()
+        self.capture_button = QPushButton("Capture")
+        self.capture_button.setCheckable(True)
         
-        self.start_stop_button = QPushButton("Start")
-        self.start_stop_button.setCheckable(True)
-        self.start_stop_button.toggled.connect(self.toggle_start_stop)
-        
-        mode_layout.addWidget(self.mode_combobox)
-        mode_layout.addWidget(self.start_stop_button)
-        self.layout.addLayout(mode_layout)
+        capture_layout.addWidget(self.capture_button)
+        self.layout.addLayout(capture_layout)
         
         self.setLayout(self.layout)
         self.setWindowTitle("Camera Control Widget")
         # self.setGeometry(100, 100, 300, 200)
 
         return self.layout
-
-    def toggle_start_stop(self, checked):
-        self.start_stop_button.setText("Stop" if checked else "Start")
-        self.mode_combobox.setEnabled(False if checked else True)

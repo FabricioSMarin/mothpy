@@ -5,17 +5,13 @@ pyqt gui
 3D print camera platform with counterwheight thruhole. 
 3D print gears/worm. 
 purchase C-A moount adpater
+add serial-esp32 communication to gui
+blackfly gigE python control 
 
 ########### Not Done ############
 3D print driver enclosure with power switch.
 3D print lens gripper (for GigE) 
 
-add serial-esp32 communication to gui
-add network-esp32 communication to gui
-add communication selector under menubar-->settings
-
-blackfly gigE python control 
-If PySpin not installed, stream images from host computer (with PySPin) or save to nertwork drive.
 
 implement tracking functionality 
 add trajectory plotting below zoom views
