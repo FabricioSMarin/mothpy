@@ -95,7 +95,10 @@ class MainWindow(QMainWindow):
         self.dpad.track_button.clicked.connect(self.track_clicked)
         self.camera_controls.connect_camera.clicked.connect(self.connect_camera)
         self.camera_controls.capture_button.clicked.connect(self.capture_image)
-
+        self.camera_controls.red_slider.valueChanged.connect(self.update_color_correction)
+        self.camera_controls.green_slider.valueChanged.connect(self.update_color_correction)
+        self.camera_controls.blue_slider.valueChanged.connect(self.update_color_correction)
+        
 
     def set_dark_theme(self):
         self.setStyleSheet("""
@@ -158,7 +161,6 @@ class MainWindow(QMainWindow):
         cursor.insertText(text)
         self.logbox.setTextCursor(cursor)
         self.logbox.ensureCursorVisible()
-
 
     def closeEvent(self, event):
         """ Triggered when the window is closed, used to save settings. """
@@ -243,7 +245,8 @@ class MainWindow(QMainWindow):
          
     def connect_ESP(self):
         # Replace with the correct port (e.g., "COM3" for Windows, "/dev/ttyUSB0" for Linux/Mac)
-        SERIAL_PORT = "/dev/cu.usbserial-0001"  
+        # SERIAL_PORT = "/dev/cu.usbserial-0001"  #for macos
+        SERIAL_PORT = "COM3"  #for Windows
         BAUD_RATE = 115200  # Default ESP32 baud rate
         self.esp32 = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
         time.sleep(2)
@@ -274,7 +277,6 @@ class MainWindow(QMainWindow):
             time.sleep(0.1)
             cmd = f"set_velocity:{i},{motor.velo}"
             self.esp32.write(cmd.encode())
-
 
     def up_clicked(self):
         #"{motor_num},{direction},{steps},{velocity},{acceltime},{backlash}\n"
@@ -469,6 +471,39 @@ class MainWindow(QMainWindow):
                 print(f"Error during recovery: {recovery_error}")
             self.display_image(image_np)
 
+    def update_color_correction(self):
+        """Update color correction labels and apply to current image"""
+        # Update labels
+        self.camera_controls.red_label.setText(f"Red: {self.camera_controls.red_slider.value()/100:.1f}x")
+        self.camera_controls.green_label.setText(f"Green: {self.camera_controls.green_slider.value()/100:.1f}x")
+        self.camera_controls.blue_label.setText(f"Blue: {self.camera_controls.blue_slider.value()/100:.1f}x")
+        
+        # If we have an image, apply color correction
+        if hasattr(self.imgplot, 'image_data') and self.imgplot.image_data is not None:
+            self.apply_color_correction()
+
+
+    def apply_color_correction(self):
+        """Apply color correction to the current image"""
+        if len(self.imgplot.image_data.shape) != 3:
+            return  # Skip if image is not RGB/BGR
+            
+        # Get correction factors
+        r_factor = self.camera_controls.red_slider.value() / 100
+        g_factor = self.camera_controls.green_slider.value() / 100
+        b_factor = self.camera_controls.blue_slider.value() / 100
+        
+        # Make a copy of the original image
+        corrected_image = self.imgplot.image_data.copy()
+        
+        # Apply correction factors (assuming BGR format from OpenCV)
+        corrected_image[:, :, 0] = np.clip(corrected_image[:, :, 0] * b_factor, 0, 255)
+        corrected_image[:, :, 1] = np.clip(corrected_image[:, :, 1] * g_factor, 0, 255)
+        corrected_image[:, :, 2] = np.clip(corrected_image[:, :, 2] * r_factor, 0, 255)
+        
+        # Update the display
+        self.imgplot.image_item.setImage(corrected_image)
+
 
     def display_image(self, image_np):
         """
@@ -482,7 +517,13 @@ class MainWindow(QMainWindow):
         image_np = np.rot90(image_np, k=-1)  # k=-1 rotates 90 degrees clockwise
 
         self.imgplot.image_data = image_np
-        self.imgplot.image_item.setImage(image_np)
+
+        # Apply any existing color correction
+        if hasattr(self, 'red_slider'):
+            self.apply_color_correction()
+        else:
+            self.imgplot.image_item.setImage(image_np)
+
 
         # Resize ROIs if this is the first image
         if not hasattr(self, 'rois_initialized'):

@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
-    QPushButton, QComboBox
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QSlider, QPushButton, QComboBox
 )
+from PyQt5.QtCore import Qt 
 import sys
 
 class Controls(QWidget):
@@ -57,8 +57,39 @@ class Controls(QWidget):
         self.capture_button = QPushButton("Capture")
         self.capture_button.setCheckable(True)
         
+             # Add RGB sliders
+        color_layout = QVBoxLayout()
+        
+        # Create sliders with labels
+        self.red_slider = QSlider(Qt.Horizontal)
+        self.green_slider = QSlider(Qt.Horizontal)
+        self.blue_slider = QSlider(Qt.Horizontal)
+        
+        # Configure sliders
+        for slider in [self.red_slider, self.green_slider, self.blue_slider]:
+            slider.setMinimum(0)
+            slider.setMaximum(200)
+            slider.setValue(100)  # 100 means no change (1.0 multiplier)
+            slider.setTickPosition(QSlider.TicksBelow)
+            slider.setTickInterval(20)
+        
+        # Create labels with current values
+        self.red_label = QLabel("Red: 1.0x")
+        self.green_label = QLabel("Green: 1.0x")
+        self.blue_label = QLabel("Blue: 1.0x")
+        
+        # Add widgets to layout
+        color_layout.addWidget(QLabel("Color Correction"))
+        color_layout.addWidget(self.red_label)
+        color_layout.addWidget(self.red_slider)
+        color_layout.addWidget(self.green_label)
+        color_layout.addWidget(self.green_slider)
+        color_layout.addWidget(self.blue_label)
+        color_layout.addWidget(self.blue_slider)
+        
         capture_layout.addWidget(self.capture_button)
         self.layout.addLayout(capture_layout)
+        self.layout.addLayout(color_layout)
         
         self.setLayout(self.layout)
         self.setWindowTitle("Camera Control Widget")
