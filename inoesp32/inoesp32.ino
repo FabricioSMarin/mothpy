@@ -3,27 +3,41 @@
 #include <Preferences.h>
 
 // WiFi Credentials
-const char* ssid = "Marinf2.4";
-const char* password = "3V@$!VE_Wifi2.4";
-// const char* ssid = "auranox";
-// const char* password = "C0ndu(tive_Wifi";
+// const char* ssid = "Marinf2.4";
+// const char* password = "3V@$!VE_Wifi2.4";
+const char* ssid = "auranox";
+const char* password = "C0ndu(tive_Wifi";
 WebServer server(80); // Add this line to declare the server instance
 Preferences preferences;
 
 #define MOTOR_COUNT 3
 
-// **Stepper Motor Pin Assignments**
-#define STEP_PIN_1 15
-#define DIR_PIN_1  14
-#define ENABLE_PIN_1 13
+// **Stepper Motor Pin Assignments** 30-pin board
+// #define STEP_PIN_1 15
+// #define DIR_PIN_1  14
+// #define ENABLE_PIN_1 13
 
-#define STEP_PIN_2 16
-#define DIR_PIN_2  17
+// #define STEP_PIN_2 16
+// #define DIR_PIN_2  17
+// #define ENABLE_PIN_2 18
+
+// #define STEP_PIN_3 27
+// #define DIR_PIN_3  22
+// #define ENABLE_PIN_3 19
+
+#define STEP_PIN_1 5
+#define DIR_PIN_1  4
+#define ENABLE_PIN_1 19
+
+#define STEP_PIN_2 17
+#define DIR_PIN_2  16
 #define ENABLE_PIN_2 18
 
-#define STEP_PIN_3 27
-#define DIR_PIN_3  22
-#define ENABLE_PIN_3 19
+#define STEP_PIN_3 22
+#define DIR_PIN_3  21
+#define ENABLE_PIN_3 23
+
+
 
 volatile bool emergencyStop = false;
 volatile bool paused = false;
@@ -32,7 +46,7 @@ volatile bool paused = false;
 //80us = 12500 steps/sec = 3.75k RPM
 // **Persistent Data: Backlash, Position, Resolution, Soft Limits**
 int backlashSteps[MOTOR_COUNT] = {10, 10, 10}; //steps
-int motorVelocities[MOTOR_COUNT] = {12500,12500,12500}; //steps/sec
+int motorVelocities[MOTOR_COUNT] = {1250,1250,1250}; //steps/sec
 float motorAccelerations[MOTOR_COUNT] = {1.0,1.0,1.0}; //seconds
 long motorPositions[MOTOR_COUNT] = {0, 0, 0}; //steps
 long softLimitPositive[MOTOR_COUNT] = {1000000, 1000000, 1000000}; //steps
@@ -57,9 +71,9 @@ struct StepperMotor {
 // **Motor Definitions**
 // Define Motors
 StepperMotor motors[MOTOR_COUNT] = {
-    {STEP_PIN_1, DIR_PIN_1, ENABLE_PIN_1, 10000, 1.0, 0, -1000000, 1000000, 0, false, true},
-    {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, 10000, 1.0, 0, -1000000, 1000000, 0, false, true},
-    {STEP_PIN_3, DIR_PIN_3, ENABLE_PIN_3, 10000, 1.0, 0, -1000000, 1000000, 0, false, true}
+    {STEP_PIN_1, DIR_PIN_1, ENABLE_PIN_1, 5000, 1.0, 0, -1000000, 1000000, 0, false, true},
+    {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, 5000, 1.0, 0, -1000000, 1000000, 0, false, true},
+    {STEP_PIN_3, DIR_PIN_3, ENABLE_PIN_3, 5000, 1.0, 0, -1000000, 1000000, 0, false, true}
 };
 
 // **Web Interface**
