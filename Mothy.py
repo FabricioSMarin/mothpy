@@ -1,5 +1,6 @@
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QSizePolicy, QLineEdit
-from PyQt5.QtCore import Qt, QSettings, pyqtSignal, QTimer, QThread, QObject
+from PyQt5.QtCore import Qt, QSettings, pyqtSignal, QTimer, QThread, QObject, QUrl
+from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PyQt5 import QtCore
 import sys
 import time
@@ -8,38 +9,12 @@ import imageio
 from scipy.optimize import curve_fit
 import PySpin
 from PIL import Image  # Only used for resizing if needed
-import requests  # For HTTP requests to ESP32
+from urllib.parse import urlencode
 
 from motor import MotorSettings
 from cam import Controls
 from dpad import DPad
 from visuals import ImagePlotWidget
-
-# Worker class for HTTP requests in separate thread
-class HTTPWorker(QObject):
-    finished = pyqtSignal()
-    result = pyqtSignal(str)
-    error = pyqtSignal(str)
-    
-    def __init__(self, url, params=None):
-        super().__init__()
-        self.url = url
-        self.params = params
-    
-    def run(self):
-        """Run HTTP request in separate thread"""
-        try:
-            response = requests.get(self.url, params=self.params, timeout=2)
-            if response.status_code == 200:
-                self.result.emit(response.text)
-            else:
-                self.error.emit(f"Request failed: {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            self.error.emit(f"Request error: {e}")
-        except Exception as e:
-            self.error.emit(f"Unexpected error: {e}")
-        finally:
-            self.finished.emit()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -58,6 +33,13 @@ class MainWindow(QMainWindow):
         self.capture_timer.timeout.connect(self.capture_single_frame)
         self.is_capturing = False
         
+        # Initialize Qt Network Manager for async HTTP requests (no threads!)
+        self.network_manager = QNetworkAccessManager(self)
+        self.network_manager.setTransferTimeout(500)  # 500ms timeout
+        self.pending_requests = []  # Track pending network requests
+        self.max_concurrent_requests = 5  # Limit concurrent requests
+        self.is_closing = False  # Flag to prevent new requests during shutdown
+        
         self.initUI()
         self.loadSettings()
         self.update_settings()
@@ -71,8 +53,8 @@ class MainWindow(QMainWindow):
         self.main_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
 
         self.logbox = QTextEdit("")
-        self.logbox.setMinimumWidth(600)
         self.logbox.setFixedHeight(150)
+        self.logbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.logbox.setStyleSheet("background: rgb(30,30,30); color: rgb(30,70,30)")
         self.logbox.setReadOnly(True)
 
@@ -89,6 +71,9 @@ class MainWindow(QMainWindow):
         self.camera_controls = Controls()
         self.camera_controls.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.imgplot = ImagePlotWidget()
+        
+        # Set imgplot to expand to fill available space
+        self.imgplot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Set fixed size policy to preserve geometry
         self.dpad.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -98,6 +83,7 @@ class MainWindow(QMainWindow):
         esp32_ip_layout.addWidget(QLabel("ESP32 IP:"))
         esp32_ip_layout.addWidget(self.esp32_ip_edit)
         
+        # Create controls layout with fixed width
         controols = QVBoxLayout()
         controols.addLayout(esp32_ip_layout)
         controols.addWidget(self.dpad)
@@ -106,13 +92,20 @@ class MainWindow(QMainWindow):
         controols.addWidget(self.motor3)
         controols.addWidget(self.camera_controls)
         controols.setAlignment(Qt.AlignTop)
+        
+        # Wrap controls in a widget with fixed size policy
+        controls_widget = QWidget()
+        controls_widget.setLayout(controols)
+        controls_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        controls_widget.setMaximumWidth(320)  # Slightly wider than motor widgets
 
         visuals = QVBoxLayout()
         visuals.addWidget(self.imgplot)
         visuals.addWidget(self.logbox)
 
-        self.main_layout.addLayout(visuals)
-        self.main_layout.addLayout(controols)
+        # Add layouts with stretch factors - visuals gets priority
+        self.main_layout.addLayout(visuals, stretch=1)
+        self.main_layout.addWidget(controls_widget, stretch=0)
 
         central_widget.setLayout(self.main_layout)
         self.setCentralWidget(central_widget)
@@ -197,6 +190,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """ Triggered when the window is closed, used to save settings. """
+        # Set closing flag to prevent new requests
+        self.is_closing = True
+        
         sys.stdout = self.original_stdout
         self.stdout_stream.newText.disconnect()  
         self.saveSettings()
@@ -205,12 +201,13 @@ class MainWindow(QMainWindow):
         if self.is_capturing:
             self.stop_continuous_capture()
         
-        # Wait for any HTTP threads to finish
-        if hasattr(self, 'http_threads'):
-            for thread in self.http_threads:
-                if thread.isRunning():
-                    thread.quit()
-                    thread.wait(1000)  # Wait up to 1 second
+        # Abort all pending network requests
+        if hasattr(self, 'pending_requests'):
+            for reply in self.pending_requests[:]:
+                if reply and not reply.isFinished():
+                    reply.abort()
+            self.pending_requests.clear()
+            print(f"Aborted all pending network requests")
         
         self.disconnec_camera()
         event.accept()
@@ -305,56 +302,57 @@ class MainWindow(QMainWindow):
         return f"http://{esp32_ip}"
     
     def send_http_request(self, endpoint, params=None, callback=None):
-        """Helper function to send HTTP requests to ESP32 in a separate thread"""
+        """Send async HTTP request using Qt's network manager (no threads!)"""
+        # Don't start new requests if we're closing
+        if self.is_closing:
+            return
+        
+        # Check if we've hit the concurrent request limit
+        active_requests = sum(1 for r in self.pending_requests if r and not r.isFinished())
+        if active_requests >= self.max_concurrent_requests:
+            print(f"Warning: Maximum concurrent HTTP requests ({self.max_concurrent_requests}) reached. Skipping request.")
+            return
+        
+        # Build URL with parameters
         url = f"{self.get_esp32_url()}{endpoint}"
+        if params:
+            url += "?" + urlencode(params)
         
-        # Create worker and thread
-        thread = QThread()
-        worker = HTTPWorker(url, params)
+        # Create and send request
+        request = QNetworkRequest(QUrl(url))
+        reply = self.network_manager.get(request)
         
-        # Store references to prevent garbage collection
-        if not hasattr(self, 'http_threads'):
-            self.http_threads = []
-        if not hasattr(self, 'http_workers'):
-            self.http_workers = []
+        # Store reply to track it
+        self.pending_requests.append(reply)
         
-        self.http_threads.append(thread)
-        self.http_workers.append(worker)
+        # Connect completion signal
+        reply.finished.connect(lambda: self.on_request_finished(reply, callback))
         
-        worker.moveToThread(thread)
+    def on_request_finished(self, reply, callback=None):
+        """Handle completed network request"""
+        # Remove from pending list
+        if reply in self.pending_requests:
+            self.pending_requests.remove(reply)
         
-        # Connect signals
-        thread.started.connect(worker.run)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(lambda: self.on_worker_finished(worker, thread))
+        # Don't process if we're closing
+        if self.is_closing:
+            reply.deleteLater()
+            return
         
-        # Connect result/error handlers
-        worker.result.connect(lambda result: self.on_http_success(result, callback))
-        worker.error.connect(self.on_http_error)
+        # Check for errors
+        if reply.error() == QNetworkReply.NoError:
+            # Success
+            result = reply.readAll().data().decode('utf-8')
+            if callback:
+                callback(result)
+        else:
+            # Error
+            error_string = reply.errorString()
+            print(f"ESP32 Error: {error_string}")
+            print("Make sure the ESP32 is on the network and the IP is correct.")
         
-        # Start thread
-        thread.start()
-    
-    def on_worker_finished(self, worker, thread):
-        """Clean up worker and thread after completion"""
-        if worker in self.http_workers:
-            self.http_workers.remove(worker)
-        if thread in self.http_threads:
-            self.http_threads.remove(thread)
-        worker.deleteLater()
-        thread.deleteLater()
-    
-    def on_http_success(self, result, callback=None):
-        """Handle successful HTTP response"""
-        # Optionally log success
-        # print(f"Command sent successfully")
-        if callback:
-            callback(result)
-    
-    def on_http_error(self, error_msg):
-        """Handle HTTP error"""
-        print(f"ESP32 Error: {error_msg}")
-        print("Make sure the ESP32 is on the network and the IP is correct.")
+        # Clean up
+        reply.deleteLater()
             
     def send_motor_settings_to_esp32(self):
         """Send motor settings to ESP32 via HTTP (call when settings change)"""
@@ -793,10 +791,18 @@ class MainWindow(QMainWindow):
 
     def disconnec_camera(self):
         # Properly deinitialize and release the camera.
-        self.cam.DeInit()
-        del self.cam
-        self.camList.Clear()
-        self.system.ReleaseInstance()
+        try:
+            if hasattr(self, 'cam') and self.cam is not None:
+                if self.cam.IsStreaming():
+                    self.cam.EndAcquisition()
+                self.cam.DeInit()
+                del self.cam
+            if hasattr(self, 'camList') and self.camList is not None:
+                self.camList.Clear()
+            if hasattr(self, 'system') and self.system is not None:
+                self.system.ReleaseInstance()
+        except Exception as e:
+            print(f"Error disconnecting camera: {e}")
 
     def best_fit_curve(x, y, t, degree=2):
         """
