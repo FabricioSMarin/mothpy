@@ -245,6 +245,7 @@ class MainWindow(QMainWindow):
         
         # Save ESP32 IP address
         self.settings.setValue("esp32_ip", self.esp32_ip_edit.text())
+        self.settings.sync()  # Force settings to be written to disk
 
     def loadSettings(self):
         """ Load the QLineEdit contents from QSettings """
@@ -277,7 +278,6 @@ class MainWindow(QMainWindow):
 
             self.camera_controls.exposure_edit.setText(self.settings.value("exposure", ""))
             self.camera_controls.gain_edit.setText(self.settings.value("gain", ""))
-            self.camera_controls.num_images_edit.setText(self.settings.value("num_images", ""))
             
             # Load color mode (default to 0 = Color)
             color_mode_index = self.settings.value("mode", 0)
@@ -287,8 +287,8 @@ class MainWindow(QMainWindow):
             
             # Load ESP32 IP address
             self.esp32_ip_edit.setText(self.settings.value("esp32_ip", "192.168.1.100"))
-        except:
-            pass
+        except Exception as e:
+            print(f"Error loading settings: {e}")
 
     def update_settings(self): 
         attrs = {"res":"Resolution","velo":"Velocity","acc":"Acceleration","bac":"Backlash"}
