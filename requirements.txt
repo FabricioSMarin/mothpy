@@ -1,0 +1,8 @@
+PyQt5
+numpy
+imageio
+scipy
+PySpin
+Pillow
+requests
+

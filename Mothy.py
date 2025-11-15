@@ -1,20 +1,45 @@
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QSizePolicy
-from PyQt5.QtCore import Qt, QSettings, pyqtSignal, QTimer
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QSizePolicy, QLineEdit
+from PyQt5.QtCore import Qt, QSettings, pyqtSignal, QTimer, QThread, QObject
 from PyQt5 import QtCore
 import sys
-import serial
 import time
 import numpy as np
 import imageio
 from scipy.optimize import curve_fit
 import PySpin
 from PIL import Image  # Only used for resizing if needed
-
+import requests  # For HTTP requests to ESP32
 
 from motor import MotorSettings
 from cam import Controls
 from dpad import DPad
 from visuals import ImagePlotWidget
+
+# Worker class for HTTP requests in separate thread
+class HTTPWorker(QObject):
+    finished = pyqtSignal()
+    result = pyqtSignal(str)
+    error = pyqtSignal(str)
+    
+    def __init__(self, url, params=None):
+        super().__init__()
+        self.url = url
+        self.params = params
+    
+    def run(self):
+        """Run HTTP request in separate thread"""
+        try:
+            response = requests.get(self.url, params=self.params, timeout=2)
+            if response.status_code == 200:
+                self.result.emit(response.text)
+            else:
+                self.error.emit(f"Request failed: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            self.error.emit(f"Request error: {e}")
+        except Exception as e:
+            self.error.emit(f"Unexpected error: {e}")
+        finally:
+            self.finished.emit()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -25,9 +50,14 @@ class MainWindow(QMainWindow):
         self.stdout_stream = Stream(newText=self.onUpdateText)
         sys.stdout = self.stdout_stream
         self.settings = QSettings("Auranox", "Mothpy")  # Unique organization/app name
-        self.esp32_connected = False
         self.trajectory = np.zeros((3,10000))
         self.tracked_points = 0
+        
+        # Setup continuous capture timer
+        self.capture_timer = QTimer()
+        self.capture_timer.timeout.connect(self.capture_single_frame)
+        self.is_capturing = False
+        
         self.initUI()
         self.loadSettings()
         self.update_settings()
@@ -46,9 +76,9 @@ class MainWindow(QMainWindow):
         self.logbox.setStyleSheet("background: rgb(30,30,30); color: rgb(30,70,30)")
         self.logbox.setReadOnly(True)
 
-        # Add three instances of SimpleWidget
-        self.esp32_connect = QPushButton("connect esp32")
-        self.esp32_label = QLabel("Dsiconnected")
+        # Add ESP32 IP address field
+        self.esp32_ip_edit = QLineEdit("192.168.1.100")  # Default IP
+        self.esp32_ip_edit.setPlaceholderText("ESP32 IP Address")
         self.dpad = DPad()
         self.motor1 = MotorSettings("Alt", self)
         self.motor1.setFixedWidth(300)
@@ -62,11 +92,14 @@ class MainWindow(QMainWindow):
 
         # Set fixed size policy to preserve geometry
         self.dpad.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        esp32_box = QHBoxLayout()
-        esp32_box.addWidget(self.esp32_connect)
-        esp32_box.addWidget(self.esp32_label)
+        
+        # ESP32 IP address input
+        esp32_ip_layout = QHBoxLayout()
+        esp32_ip_layout.addWidget(QLabel("ESP32 IP:"))
+        esp32_ip_layout.addWidget(self.esp32_ip_edit)
+        
         controols = QVBoxLayout()
-        controols.addLayout(esp32_box)
+        controols.addLayout(esp32_ip_layout)
         controols.addWidget(self.dpad)
         controols.addWidget(self.motor1)
         controols.addWidget(self.motor2)
@@ -85,7 +118,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         self.setWindowTitle("PyQt5 Main Window with SimpleWidgets")
 
-        self.esp32_connect.clicked.connect(self.connect_ESP)
         self.dpad.up_button.clicked.connect(self.up_clicked)
         self.dpad.down_button.clicked.connect(self.down_clicked)
         self.dpad.left_button.clicked.connect(self.left_clicked)
@@ -95,6 +127,7 @@ class MainWindow(QMainWindow):
         self.dpad.track_button.clicked.connect(self.track_clicked)
         self.camera_controls.connect_camera.clicked.connect(self.connect_camera)
         self.camera_controls.capture_button.clicked.connect(self.capture_image)
+        self.camera_controls.capture_mode_combobox.currentIndexChanged.connect(self.on_capture_mode_changed)
         self.camera_controls.red_slider.valueChanged.connect(self.update_color_correction)
         self.camera_controls.green_slider.valueChanged.connect(self.update_color_correction)
         self.camera_controls.blue_slider.valueChanged.connect(self.update_color_correction)
@@ -167,6 +200,18 @@ class MainWindow(QMainWindow):
         sys.stdout = self.original_stdout
         self.stdout_stream.newText.disconnect()  
         self.saveSettings()
+        
+        # Stop continuous capture if running
+        if self.is_capturing:
+            self.stop_continuous_capture()
+        
+        # Wait for any HTTP threads to finish
+        if hasattr(self, 'http_threads'):
+            for thread in self.http_threads:
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(1000)  # Wait up to 1 second
+        
         self.disconnec_camera()
         event.accept()
 
@@ -197,6 +242,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue("exposure", self.camera_controls.exposure_edit.text())
         self.settings.setValue("gain", self.camera_controls.gain_edit.text())
         self.settings.setValue("mode", self.camera_controls.color_mode_combobox.currentIndex())
+        
+        # Save ESP32 IP address
+        self.settings.setValue("esp32_ip", self.esp32_ip_edit.text())
 
     def loadSettings(self):
         """ Load the QLineEdit contents from QSettings """
@@ -230,7 +278,15 @@ class MainWindow(QMainWindow):
             self.camera_controls.exposure_edit.setText(self.settings.value("exposure", ""))
             self.camera_controls.gain_edit.setText(self.settings.value("gain", ""))
             self.camera_controls.num_images_edit.setText(self.settings.value("num_images", ""))
-            self.camera_controls.mode_combobox.setCurrentIndex(self.settings.value("mode", 0))
+            
+            # Load color mode (default to 0 = Color)
+            color_mode_index = self.settings.value("mode", 0)
+            if isinstance(color_mode_index, str):
+                color_mode_index = int(color_mode_index) if color_mode_index.isdigit() else 0
+            self.camera_controls.color_mode_combobox.setCurrentIndex(color_mode_index)
+            
+            # Load ESP32 IP address
+            self.esp32_ip_edit.setText(self.settings.value("esp32_ip", "192.168.1.100"))
         except:
             pass
 
@@ -243,65 +299,142 @@ class MainWindow(QMainWindow):
                 except:
                     setattr(motor, attr, None)
          
-    def connect_ESP(self):
-        # Replace with the correct port (e.g., "COM3" for Windows, "/dev/ttyUSB0" for Linux/Mac)
-        # SERIAL_PORT = "/dev/cu.usbserial-0001"  #for macos
-        SERIAL_PORT = "COM3"  #for Windows
-        BAUD_RATE = 115200  # Default ESP32 baud rate
-        self.esp32 = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-        time.sleep(2)
-        self.esp32.write(b'Hello\n')
-        time.sleep(2)
-        response = self.esp32.readline().decode().strip()
-        if response == "Hi":
-            self.esp32_connected = True
-            self.esp32_label.setText("Connected")
-            self.send_motor_settings()
-        else: 
-            self.esp32_connected = False
-            self.esp32_label.setText("Disconnected")
-
-    def check_esp_connection(self):
-        if self.esp32.is_open():
-            self.esp32_connected=True
-        else:
-            self.esp32_connected=False
+    def get_esp32_url(self):
+        """Get the base URL for ESP32 from the IP address field"""
+        esp32_ip = self.esp32_ip_edit.text()
+        return f"http://{esp32_ip}"
+    
+    def send_http_request(self, endpoint, params=None, callback=None):
+        """Helper function to send HTTP requests to ESP32 in a separate thread"""
+        url = f"{self.get_esp32_url()}{endpoint}"
+        
+        # Create worker and thread
+        thread = QThread()
+        worker = HTTPWorker(url, params)
+        
+        # Store references to prevent garbage collection
+        if not hasattr(self, 'http_threads'):
+            self.http_threads = []
+        if not hasattr(self, 'http_workers'):
+            self.http_workers = []
+        
+        self.http_threads.append(thread)
+        self.http_workers.append(worker)
+        
+        worker.moveToThread(thread)
+        
+        # Connect signals
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(lambda: self.on_worker_finished(worker, thread))
+        
+        # Connect result/error handlers
+        worker.result.connect(lambda result: self.on_http_success(result, callback))
+        worker.error.connect(self.on_http_error)
+        
+        # Start thread
+        thread.start()
+    
+    def on_worker_finished(self, worker, thread):
+        """Clean up worker and thread after completion"""
+        if worker in self.http_workers:
+            self.http_workers.remove(worker)
+        if thread in self.http_threads:
+            self.http_threads.remove(thread)
+        worker.deleteLater()
+        thread.deleteLater()
+    
+    def on_http_success(self, result, callback=None):
+        """Handle successful HTTP response"""
+        # Optionally log success
+        # print(f"Command sent successfully")
+        if callback:
+            callback(result)
+    
+    def on_http_error(self, error_msg):
+        """Handle HTTP error"""
+        print(f"ESP32 Error: {error_msg}")
+        print("Make sure the ESP32 is on the network and the IP is correct.")
             
-    def send_motor_settings(self):
-        for i, motor, in enumerate([self.motor1, self.motor2, self.motor3]):
-            cmd = f"set_backlash:{i},{motor.bac}"
-            self.esp32.write(cmd.encode())
-            time.sleep(0.1)
-            cmd = f"set_acceleration:{i},{motor.acc}"
-            self.esp32.write(cmd.encode())
-            time.sleep(0.1)
-            cmd = f"set_velocity:{i},{motor.velo}"
-            self.esp32.write(cmd.encode())
+    def send_motor_settings_to_esp32(self):
+        """Send motor settings to ESP32 via HTTP (call when settings change)"""
+        # Motor 1 = Alt (altitude), Motor 2 = Azi (azimuth)
+        motors_to_send = [
+            (1, self.motor1),  # Motor 1 = Alt
+            (2, self.motor2),  # Motor 2 = Azi
+        ]
+        
+        for motor_num, motor in motors_to_send:
+            # Send resolution
+            if motor.res:
+                self.send_http_request("/set_resolution", {
+                    "motor": motor_num,
+                    "res": motor.res,
+                    "unit": "degrees"
+                })
+            
+            # Send velocity
+            if motor.velo:
+                self.send_http_request("/set_velocity", {
+                    "motor": motor_num,
+                    "velocity": motor.velo
+                })
+            
+            # Send acceleration
+            if motor.acc:
+                self.send_http_request("/set_acceleration", {
+                    "motor": motor_num,
+                    "accel": motor.acc
+                })
+            
+            # Send backlash
+            if motor.bac:
+                self.send_http_request("/set_backlash", {
+                    "motor": motor_num,
+                    "backlsh": motor.bac
+                })
+            
+            time.sleep(0.05)  # Small delay between requests
+        
+        print("Motor settings sent to ESP32")
 
     def up_clicked(self):
-        #"{motor_num},{direction},{steps},{velocity},{acceltime},{backlash}\n"
-        command =f"move:{1},F,{self.dpad.ud_lineedit.text()}\n"
-        self.esp32.write(command.encode())
+        """Move Motor 1 (Alt) Forward"""
+        steps = self.dpad.ud_lineedit.text()
+        command = f"move:1,F,{steps}"
+        self.send_http_request("/command", {"cmd": command})
+        print(f"Moving Alt up: {steps} steps")
 
     def down_clicked(self):
-        command =f"move:{1},B,{self.dpad.ud_lineedit.text()}\n" 
-        self.esp32.write(command.encode())
+        """Move Motor 1 (Alt) Backward"""
+        steps = self.dpad.ud_lineedit.text()
+        command = f"move:1,B,{steps}"
+        self.send_http_request("/command", {"cmd": command})
+        print(f"Moving Alt down: {steps} steps")
 
     def left_clicked(self):
-        command =f"move:{2},B,{self.dpad.lr_lineedit.text()}\n" 
-        self.esp32.write(command.encode())
+        """Move Motor 2 (Azi) Forward"""
+        steps = self.dpad.lr_lineedit.text()
+        command = f"move:2,F,{steps}"
+        self.send_http_request("/command", {"cmd": command})
+        print(f"Moving Azi left: {steps} steps")
 
     def right_clicked(self):
-        command =f"move:{2},F,{self.dpad.lr_lineedit.text()}\n" 
-        self.esp32.write(command.encode())
+        """Move Motor 2 (Azi) Backward"""
+        steps = self.dpad.lr_lineedit.text()
+        command = f"move:2,B,{steps}"
+        self.send_http_request("/command", {"cmd": command})
+        print(f"Moving Azi right: {steps} steps")
 
     def near_clicked(self):
-        command =f"move:{3},B,{self.dpad.nf_lineedit.text()}\n" 
-        self.esp32.write(command.encode())
+        """Move Motor 3 (Focus) - if connected"""
+        steps = self.dpad.nf_lineedit.text()
+        print(f"Near/Focus not connected to ESP32 motor")
 
     def far_clicked(self):
-        command =f"move:{3},F,{self.dpad.nf_lineedit.text()}\n" 
-        self.esp32.write(command.encode())
+        """Move Motor 3 (Focus) - if connected"""
+        steps = self.dpad.nf_lineedit.text()
+        print(f"Far/Focus not connected to ESP32 motor")
 
     def track_clicked(self):
         #if !track.isChecked(): closee thread
@@ -349,14 +482,75 @@ class MainWindow(QMainWindow):
         except:
             print("no camera connected")
 
+    def on_capture_mode_changed(self):
+        """Handle mode change - stop continuous capture if switching away from it"""
+        if self.is_capturing:
+            self.stop_continuous_capture()
+        
+        # Update button text based on mode
+        capture_mode = self.camera_controls.capture_mode_combobox.currentText()
+        if capture_mode == "Single":
+            self.camera_controls.capture_button.setText("Capture")
+        else:
+            self.camera_controls.capture_button.setText("Start")
+    
     def capture_image(self):
+        """Main capture function that handles both single and continuous modes"""
+        capture_mode = self.camera_controls.capture_mode_combobox.currentText()
+        
+        if capture_mode == "Single":
+            # Single shot mode
+            self.capture_single_frame()
+            self.camera_controls.capture_button.setChecked(False)
+        else:
+            # Continuous mode - toggle on/off
+            if self.is_capturing:
+                # Stop continuous capture
+                self.stop_continuous_capture()
+            else:
+                # Start continuous capture
+                self.start_continuous_capture()
+    
+    def start_continuous_capture(self):
+        """Start continuous image capture"""
+        self.is_capturing = True
+        self.camera_controls.capture_button.setText("Stop")
+        # Capture at ~10 fps (100ms interval) - adjust as needed for your camera
+        self.capture_timer.start(100)  # milliseconds
+        print("Started continuous capture mode")
+    
+    def stop_continuous_capture(self):
+        """Stop continuous image capture"""
+        self.is_capturing = False
+        self.capture_timer.stop()
+        
+        # Update button based on current mode
+        capture_mode = self.camera_controls.capture_mode_combobox.currentText()
+        if capture_mode == "Continuous":
+            self.camera_controls.capture_button.setText("Start")
+        else:
+            self.camera_controls.capture_button.setText("Capture")
+        self.camera_controls.capture_button.setChecked(False)
+        
+        # Stop camera acquisition
+        try:
+            if self.cam.IsStreaming():
+                self.cam.EndAcquisition()
+        except:
+            pass
+        print("Stopped continuous capture mode")
+    
+    def capture_single_frame(self):
+        """Capture a single frame from the camera"""
+        # Determine if we're in continuous mode (check this first)
+        is_continuous = self.is_capturing
+        
         # Read parameter values from UI fields with defaults.
         try:
             exposure_time = float(self.camera_controls.exposure_edit.text())
-            # Convert seconds to microseconds
-            exposure_time = exposure_time   # µs
+            # Input is already in microseconds
         except ValueError:
-            exposure_time = 10000  # default exposure time 0.01 seconds
+            exposure_time = 10000  # default exposure time 10000 µs
 
         try:
             gain = float(self.camera_controls.gain_edit.text())
@@ -383,13 +577,25 @@ class MainWindow(QMainWindow):
                 exposure_min = exposure_node.GetMin()
                 exposure_max = exposure_node.GetMax()
                 # Ensure exposure_time is within valid range
+                requested_exposure = exposure_time
                 exposure_time = max(min(exposure_time, exposure_max), exposure_min)
                 exposure_node.SetValue(exposure_time)
-                print(f"Set exposure time to {exposure_time} µs")
+                
+                # Read back the actual value set
+                actual_exposure = exposure_node.GetValue()
+                
+                # Only print if not in continuous mode to reduce spam
+                if not is_continuous:
+                    print(f"Requested exposure: {requested_exposure} µs")
+                    print(f"Clamped to valid range: {exposure_time} µs")
+                    print(f"Actual value set on camera: {actual_exposure} µs ({actual_exposure/1000:.3f} ms)")
+                    print(f"Valid camera range: {exposure_min} - {exposure_max} µs")
             else:
-                print("Exposure time node not available/writable")
+                if not is_continuous:
+                    print("Exposure time node not available/writable")
         except Exception as e:
-            print("Could not set exposure time:", e)
+            if not is_continuous:
+                print("Could not set exposure time:", e)
 
         # Set gain mode to manual and adjust gain value
         try:
@@ -405,57 +611,83 @@ class MainWindow(QMainWindow):
                 # Ensure gain is within valid range
                 gain = max(min(gain, gain_max), gain_min)
                 gain_node.SetValue(gain)
-                print(f"Set gain to {gain} dB")
+                # Only print if not in continuous mode to reduce spam
+                if not is_continuous:
+                    print(f"Set gain to {gain} dB")
             else:
-                print("Gain node not available/writable")
+                if not is_continuous:
+                    print("Gain node not available/writable")
         except Exception as e:
-            print("Could not set gain:", e)
-
+            if not is_continuous:
+                print("Could not set gain:", e)
+        
         try:
             acquisition_mode_node = PySpin.CEnumerationPtr(nodemap.GetNode("AcquisitionMode"))
             if PySpin.IsAvailable(acquisition_mode_node) and PySpin.IsWritable(acquisition_mode_node):
-                acquisition_mode_node.SetIntValue(PySpin.AcquisitionMode_SingleFrame)
+                if is_continuous:
+                    acquisition_mode_node.SetIntValue(PySpin.AcquisitionMode_Continuous)
+                else:
+                    acquisition_mode_node.SetIntValue(PySpin.AcquisitionMode_SingleFrame)
         except Exception as e:
-            print("Could not set acquisition mode:", e)
+            if not is_continuous:
+                print("Could not set acquisition mode:", e)
 
         try:
-            # Stop any existing acquisition
-            if self.cam.IsStreaming():
-                self.cam.EndAcquisition()
-                time.sleep(0.1)  # Give camera time to stop
+            # Only reset camera if not already in continuous mode
+            if not is_continuous or not self.cam.IsStreaming():
+                # Stop any existing acquisition
+                if self.cam.IsStreaming():
+                    self.cam.EndAcquisition()
+                    time.sleep(0.1)  # Give camera time to stop
 
-            # Reset the camera if needed
-            self.cam.DeInit()
-            self.cam.Init()
-            time.sleep(0.1)  # Give camera time to initialize
+                # Reset the camera if needed (only for single frame mode)
+                if not is_continuous:
+                    self.cam.DeInit()
+                    self.cam.Init()
+                    time.sleep(0.1)  # Give camera time to initialize
 
-            # ... existing exposure and gain setting code ...
+                # Begin new acquisition
+                self.cam.BeginAcquisition()
 
-            # Begin new acquisition
-            self.cam.BeginAcquisition()
             image_np = None
 
             # Create an image processor instance
             image_processor = PySpin.ImageProcessor()
 
-            # Acquire single image with longer timeout (5000ms instead of 1000ms)
-            image_result = self.cam.GetNextImage(3000)
+            # Acquire image with timeout
+            image_result = self.cam.GetNextImage(1000 if is_continuous else 3000)
             if image_result.IsIncomplete():
                 print("Image incomplete with status %d" % image_result.GetImageStatus())
             else:
                 if display_mode == "Color":
+                    # Convert to color BGR8
                     converted_image = image_processor.Convert(image_result, PySpin.PixelFormat_BGR8)
                     image_np = converted_image.GetNDArray()
-                else:
-                    image_np = image_result.GetNDArray()
+                elif display_mode == "Grayscale":
+                    # Convert to color first, then to grayscale
+                    converted_image = image_processor.Convert(image_result, PySpin.PixelFormat_BGR8)
+                    image_color = converted_image.GetNDArray()
+                    if len(image_color.shape) == 3:
+                        image_np = np.dot(image_color[..., :3], [0.114, 0.587, 0.299])
+                        image_np = image_np.astype(np.uint8)
+                    else:
+                        image_np = image_color
+                else:  # Mono mode
+                    # Get raw monochrome data from camera
+                    try:
+                        converted_image = image_processor.Convert(image_result, PySpin.PixelFormat_Mono8)
+                        image_np = converted_image.GetNDArray()
+                    except:
+                        # Fallback to raw data if Mono8 conversion fails
+                        image_np = image_result.GetNDArray()
+            
             image_result.Release()
-            self.cam.EndAcquisition()
+            
+            # Only end acquisition in single frame mode
+            if not is_continuous:
+                self.cam.EndAcquisition()
 
             if image_np is not None:
-                if display_mode == "Grayscale":
-                    if len(image_np.shape) == 3:
-                        image_np = np.dot(image_np[..., :3], [0.114, 0.587, 0.299])
-                        image_np = image_np.astype(np.uint8)
                 self.display_image(image_np)
 
         except Exception as e:

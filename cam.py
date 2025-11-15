@@ -25,7 +25,7 @@ class Controls(QWidget):
 
         # Exposure Time row
         exposure_layout = QHBoxLayout()
-        exposure_label = QLabel("Exposure Time (s):")
+        exposure_label = QLabel("Exposure Time (µs):")
         exposure_label.setFixedWidth(label_width)
         self.exposure_edit = QLineEdit()
         self.exposure_edit.setFixedWidth(edit_width)
@@ -47,15 +47,26 @@ class Controls(QWidget):
         color_mode_label = QLabel("Color Mode:")
         color_mode_label.setFixedWidth(label_width)
         self.color_mode_combobox = QComboBox()
-        self.color_mode_combobox.addItems(["Color", "Grayscale"])
+        self.color_mode_combobox.addItems(["Color", "Grayscale", "Mono"])
+        self.color_mode_combobox.setFixedWidth(edit_width)
         color_mode_layout.addWidget(color_mode_label)
         color_mode_layout.addWidget(self.color_mode_combobox)
         self.layout.addLayout(color_mode_layout)
         
         # Mode selection and start/stop button
         capture_layout = QHBoxLayout()
+        
+        # Capture mode selector
+        capture_mode_label = QLabel("Mode:")
+        self.capture_mode_combobox = QComboBox()
+        self.capture_mode_combobox.addItems(["Single", "Continuous"])
+        
         self.capture_button = QPushButton("Capture")
         self.capture_button.setCheckable(True)
+        
+        capture_layout.addWidget(capture_mode_label)
+        capture_layout.addWidget(self.capture_mode_combobox)
+        capture_layout.addWidget(self.capture_button)
         
              # Add RGB sliders
         color_layout = QVBoxLayout()
@@ -87,7 +98,6 @@ class Controls(QWidget):
         color_layout.addWidget(self.blue_label)
         color_layout.addWidget(self.blue_slider)
         
-        capture_layout.addWidget(self.capture_button)
         self.layout.addLayout(capture_layout)
         self.layout.addLayout(color_layout)
         
