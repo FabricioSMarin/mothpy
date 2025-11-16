@@ -2,6 +2,9 @@
 #include <WebServer.h>
 #include <Preferences.h>
 
+// Debug output (set to 0 to save ~50KB of program space)
+#define DEBUG_SERIAL 0
+
 // WiFi Credentials
 const char* ssid = "Marinf2.4";
 const char* password = "3V@$!VE_Wifi2.4";
@@ -42,13 +45,9 @@ volatile bool emergencyStop = false;
 //NOTE: nema17 RPM range 100-500 == 600us delay (could have sworn I've gone to 200-300us..)
 //Minimum delay, unloaded is 80 us; way faster than the alleged 100-500 as described online. 
 //80us = 12500 steps/sec = 3.75k RPM
-// **Persistent Data: Backlash, Position, Resolution, Soft Limits**
-int backlashSteps[MOTOR_COUNT] = {10, 10}; //steps
-int motorVelocities[MOTOR_COUNT] = {1250,1250}; //steps/sec
-float motorAccelerations[MOTOR_COUNT] = {1.0,1.0}; //seconds
+
+// **Persistent Data: Position, Resolution**
 long motorPositions[MOTOR_COUNT] = {0, 0}; //steps
-long softLimitPositive[MOTOR_COUNT] = {1000000, 1000000}; //steps
-long softLimitNegative[MOTOR_COUNT] = {-1000000, -1000000}; //steps
 int stepsPerUnit[MOTOR_COUNT] = {200, 200}; // Steps per degree/mm
 String unitType[MOTOR_COUNT] = {"degrees", "degrees"}; 
 
@@ -69,237 +68,148 @@ struct StepperMotor {
 // **Motor Definitions**
 // Define Motors
 StepperMotor motors[MOTOR_COUNT] = {
-    {STEP_PIN_1, DIR_PIN_1, ENABLE_PIN_1, 5000, 1.0, 0, -1000000, 1000000, 0, false, true},
-    {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, 5000, 1.0, 0, -1000000, 1000000, 0, false, true},
+    {STEP_PIN_1, DIR_PIN_1, ENABLE_PIN_1, 15000, 0.1, 0, -1000000, 1000000, 0, false, true},
+    {STEP_PIN_2, DIR_PIN_2, ENABLE_PIN_2, 15000, 0.1, 0, -1000000, 1000000, 0, false, true},
 };
 
-// **Web Interface**
+// **Enhanced Web Interface with Keyboard & Gamepad Support**
 const char webpage[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>ESP32 Stepper Control</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { text-align: center; font-family: Arial; }
-        button, input, select { padding: 10px; margin: 5px; font-size: 16px; }
-    </style>
-</head>
+<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<title>ESP32 Motor Control</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:Arial;text-align:center;background:#2b2b2b;color:#fff;margin:20px}
+.container{max-width:800px;margin:0 auto}
+.pos-display{font-size:24px;margin:20px;padding:15px;background:#3b3b3b;border-radius:8px}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:20px 0}
+button{padding:12px 20px;font-size:16px;cursor:pointer;background:#4CAF50;color:#fff;border:none;border-radius:5px;margin:5px}
+button:hover{background:#45a049}
+button:active{background:#3d8b40}
+input{padding:10px;font-size:16px;width:200px;background:#3b3b3b;color:#fff;border:1px solid #555;border-radius:5px}
+.status{padding:10px;margin:10px;background:#3b3b3b;border-radius:5px;font-size:14px}
+.gamepad-status{color:#4CAF50}
+.keyboard-help{font-size:12px;color:#888;margin:10px}
+</style></head>
 <body>
-    <h2>Stepper Motor Control</h2>
+<div class="container">
+<h2>ESP32 Motor Control</h2>
+<div class="status">
+<span id="gamepad-status">No gamepad detected</span><br>
+<span class="keyboard-help">Keyboard: Arrows + [ ] | Gamepad: D-pad + L1/R1</span>
+</div>
+<div class="pos-display">
+Motor 1: <span id="p1">0</span> steps <button onclick="z(1)">Zero</button><br>
+Motor 2: <span id="p2">0</span> steps <button onclick="z(2)">Zero</button>
+</div>
+<div class="controls">
+<div>
+<h3>Step Control</h3>
+Steps: <input id="steps" type="number" value="100"><br>
+<button onclick="move(1,'F')">Motor 1 Up</button>
+<button onclick="move(1,'B')">Motor 1 Down</button><br>
+<button onclick="move(2,'F')">Motor 2 Left</button>
+<button onclick="move(2,'B')">Motor 2 Right</button>
+</div>
+<div>
+<h3>Quick Command</h3>
+<input id="c" placeholder="move:1,F,100"><br>
+<button onclick="sendCmd()">Send Command</button>
+</div>
+</div>
+</div>
+<script>
+let gamepadIndex=-1;
+let pendingRequest=false; // Track if command is in progress
+let dpadState={up:false,down:false,left:false,right:false}; // Track D-pad button states
+let shoulderState={l1:false,r1:false}; // Track shoulder buttons for step adjustment
 
-    <h3>Motor 1 settings</h3>
-    <div>
-        <div style="font-size: 18px; font-weight: bold; margin: 10px 0;">
-            Position: <span id="pos1">0 steps</span>
-            <button onclick="setZero(1)">Set Zero</button>
-        </div>
-        <button onclick="setMotorState(1, 1)">Enable Motor 1</button>
-        <button onclick="setMotorState(1, 0)">Disable Motor 1</button><br>
-        <label> resolution <input type="number" id="res1" oninput="saveInput(1, 'res')"> 
-            <select id="unit1" onchange="saveInput(1, 'unit')">
-                <option value="degrees">Degrees</option>
-                <option value="mm">Millimeters</option>
-            </select>
-        </label>
-        <button onclick="setResolution(1)">Set</button><br>
-        <label> Pos Limit <input type="number" id="posLimit1" oninput="saveInput(1, 'posLimit')"></label>
-        <label> Neg Limit <input type="number" id="negLimit1" oninput="saveInput(1, 'negLimit')"></label>
-        <button onclick="setSoftLimits(1)">Set</button><br>
-        <label> velocity (steps/sec) <input type="number" id="velo1" oninput="saveInput(1, 'velo')"></label>
-        <button onclick="setVelocity(1)">Set</button><br>
-        <label> acceleration (s) <input type="number" id="accel1" oninput="saveInput(1, 'accel')"></label>
-        <button onclick="setAcceleration(1)">Set</button><br>
-        <label> backlash (steps) <input type="number" id="backlsh1" oninput="saveInput(1, 'backlsh')"></label>
-        <button onclick="setBacklash(1)">Set</button><br>
-    </div>
+// Update positions
+setInterval(()=>{
+fetch('/get_positions').then(r=>r.json()).then(d=>{
+d.motors.forEach(m=>document.getElementById('p'+m.id).textContent=m.steps)
+})},500);
 
-    <h3>Motor 2 settings</h3>
-    <div>
-        <div style="font-size: 18px; font-weight: bold; margin: 10px 0;">
-            Position: <span id="pos2">0 steps</span>
-            <button onclick="setZero(2)">Set Zero</button>
-        </div>
-        <button onclick="setMotorState(2, 1)">Enable Motor 2</button>
-        <button onclick="setMotorState(2, 0)">Disable Motor 2</button><br>
-        <label> resolution <input type="number" id="res2" oninput="saveInput(2, 'res')"> 
-            <select id="unit2" onchange="saveInput(2, 'unit')">
-                <option value="degrees">Degrees</option>
-                <option value="mm">Millimeters</option>
-            </select>
-        </label>
-        <button onclick="setResolution(2)">Set</button><br>
-        <label> Pos Limit <input type="number" id="posLimit2" oninput="saveInput(2, 'posLimit')"></label>
-        <label> Neg Limit <input type="number" id="negLimit2" oninput="saveInput(2, 'negLimit')"></label>
-        <button onclick="setSoftLimits(2)">Set</button><br>
-        <label> velocity (steps/sec) <input type="number" id="velo2" oninput="saveInput(2, 'velo')"></label>
-        <button onclick="setVelocity(2)">Set</button><br>
-        <label> acceleration (s) <input type="number" id="accel2" oninput="saveInput(2, 'accel')"></label>
-        <button onclick="setAcceleration(2)">Set</button><br>
-        <label> backlash (steps) <input type="number" id="backlsh2" oninput="saveInput(2, 'backlsh')"></label>
-        <button onclick="setBacklash(2)">Set</button><br>
-    </div>
+// Keyboard controls (up/down reversed for inverted mount)
+document.addEventListener('keydown',e=>{
+const s=parseInt(document.getElementById('steps').value)||100;
+if(e.key==='ArrowUp'){e.preventDefault();move(1,'B',s)}
+if(e.key==='ArrowDown'){e.preventDefault();move(1,'F',s)}
+if(e.key==='ArrowLeft'){e.preventDefault();move(2,'F',s)}
+if(e.key==='ArrowRight'){e.preventDefault();move(2,'B',s)}
+if(e.key===']'){e.preventDefault();adjustSteps(100)}
+if(e.key==='['){e.preventDefault();adjustSteps(-100)}
+});
 
+// Gamepad detection
+window.addEventListener('gamepadconnected',e=>{
+gamepadIndex=e.gamepad.index;
+document.getElementById('gamepad-status').innerHTML='Gamepad connected: '+e.gamepad.id;
+console.log('Gamepad connected:',e.gamepad);
+});
 
-    <h3>Move Motors</h3>
-    <div>
-        <label> <select id="dir1" onchange="saveInput(1, 'dir')">
-            <option value="F">Forward</option>
-            <option value="B">Backward</option>
-        </select> Steps: <input type="number" id="steps1" oninput="saveInput(1, 'steps')">
-        <button onclick="moveMotor(1)">Move</button><br>
+window.addEventListener('gamepaddisconnected',e=>{
+gamepadIndex=-1;
+document.getElementById('gamepad-status').innerHTML='No gamepad detected';
+});
 
-        <label> <select id="dir2" onchange="saveInput(2, 'dir')">
-            <option value="F">Forward</option>
-            <option value="B">Backward</option>
-        </select> Steps: <input type="number" id="steps2" oninput="saveInput(2, 'steps')">
-        <button onclick="moveMotor(2)">Move</button><br>
+// Gamepad polling - D-pad and shoulder buttons
+function pollGamepad(){
+if(gamepadIndex>=0){
+const gp=navigator.getGamepads()[gamepadIndex];
+if(gp){
+// Shoulder buttons - adjust step size
+if(gp.buttons[4].pressed&&!shoulderState.l1){
+shoulderState.l1=true;
+adjustSteps(-100);
+}else if(!gp.buttons[4].pressed)shoulderState.l1=false;
+if(gp.buttons[5].pressed&&!shoulderState.r1){
+shoulderState.r1=true;
+adjustSteps(100);
+}else if(!gp.buttons[5].pressed)shoulderState.r1=false;
+// D-pad buttons - single press only (up/down reversed for inverted mount)
+const dpadSteps=parseInt(document.getElementById('steps').value)||100;
+if(gp.buttons[12].pressed&&!dpadState.up){dpadState.up=true;move(1,'B',dpadSteps);}
+else if(!gp.buttons[12].pressed)dpadState.up=false;
+if(gp.buttons[13].pressed&&!dpadState.down){dpadState.down=true;move(1,'F',dpadSteps);}
+else if(!gp.buttons[13].pressed)dpadState.down=false;
+if(gp.buttons[14].pressed&&!dpadState.left){dpadState.left=true;move(2,'F',dpadSteps);}
+else if(!gp.buttons[14].pressed)dpadState.left=false;
+if(gp.buttons[15].pressed&&!dpadState.right){dpadState.right=true;move(2,'B',dpadSteps);}
+else if(!gp.buttons[15].pressed)dpadState.right=false;
+}
+}
+requestAnimationFrame(pollGamepad);
+}
+pollGamepad();
 
-    </div>
+function adjustSteps(delta){
+const input=document.getElementById('steps');
+let current=parseInt(input.value)||100;
+current=Math.max(1,current+delta); // Minimum 1 step
+input.value=current;
+console.log('Steps adjusted to:',current);
+}
 
+function move(m,d,s){
+s=s||parseInt(document.getElementById('steps').value)||100;
+pendingRequest=true;
+fetch('/command?cmd=move:'+m+','+d+','+s)
+.then(()=>pendingRequest=false)
+.catch(e=>{console.error(e);pendingRequest=false;});
+}
 
-    <h3>Manual Command</h3>
-    <div>
-        <input type="text" id="cmd" placeholder="move:1,B,2000">
-        <button onclick="sendCommand()">Move Motor</button><br>
-    </div>
-
-    <h3>Controls</h3>
-    <button onclick="emergencyStop()">Emergency Stop</button>
-
-    <script>
-
-
-        document.addEventListener("DOMContentLoaded", function () {
-            [1, 2].forEach(motor => loadInputs(motor)); // Load settings for all motors
-            updatePositions(); // Initial position update
-            setInterval(updatePositions, 500); // Update positions every 500ms
-        });
-
-        function updatePositions() {
-            fetch("/get_positions")
-                .then(response => response.json())
-                .then(data => {
-                    data.motors.forEach(motor => {
-                        let steps = motor.steps;
-                        let resolution = motor.resolution;
-                        let unit = motor.unit;
-                        let id = motor.id;
-                        
-                        let displayText = steps + " steps";
-                        
-                        // If resolution is defined (not zero), calculate and display real position
-                        if (resolution && resolution > 0) {
-                            let realPos = steps / resolution;
-                            displayText = realPos.toFixed(2) + " " + unit + " (" + steps + " steps)";
-                        }
-                        
-                        document.getElementById("pos" + id).textContent = displayText;
-                    });
-                })
-                .catch(error => console.error('Error updating positions:', error));
-        }
-
-        function setZero(motor) {
-            fetch(`/set_position?motor=${motor}&pos=0`)
-                .then(response => response.text())
-                .then(data => {
-                    updatePositions(); // Update display immediately
-                })
-                .catch(error => console.error('Error:', error));
-        }
-
-        function saveInput(motor, field) {
-            let value = document.getElementById(field + motor).value;
-            localStorage.setItem(field + motor, value);
-        }
-
-        function loadInputs(motor) {
-            const fields = ["res", "unit", "posLimit", "negLimit", "velo", "accel", "backlsh", "dir", "steps"];
-            fields.forEach(field => {
-                let savedValue = localStorage.getItem(field + motor);
-                if (savedValue !== null) {
-                    let element = document.getElementById(field + motor);
-                    if (element) {
-                        element.value = savedValue;
-                    }
-                }
-            });
-        }
-
-        function setMotorState(motor, state) {
-            fetch(`/set_motor_state?motor=${motor}&state=${state}`)
-                .then(response => response.text())
-                .then(data => alert(data));
-        }
-
-        function setResolution(motor) {
-            let res = document.getElementById("res" + motor).value;
-            let unit = document.getElementById("unit" + motor).value;
-            fetch(`/set_resolution?motor=${motor}&res=${res}&unit=${unit}`)
-                .then(response => response.text())
-                .then(data => alert(data));
-        }
-
-        function setSoftLimits(motor) {
-            let posLimit = document.getElementById("posLimit" + motor).value;
-            let negLimit = document.getElementById("negLimit" + motor).value;
-            fetch(`/set_soft_limits?motor=${motor}&posLimit=${posLimit}&negLimit=${negLimit}`)
-                .then(response => response.text())
-                .then(data => alert(data));
-        }
-
-        function setVelocity(motor) {
-            let velocity = document.getElementById("velo" + motor).value;
-            fetch(`/set_velocity?motor=${motor}&velocity=${velocity}`)
-                .then(response => response.text())
-                .then(data => alert(data));
-        }
-
-        function setAcceleration(motor) {
-            let accel = document.getElementById("accel" + motor).value;
-            fetch(`/set_acceleration?motor=${motor}&accel=${accel}`)
-                .then(response => response.text())
-                .then(data => alert(data));
-        }
-
-        function setBacklash(motor) {
-            let backlsh = document.getElementById("backlsh" + motor).value;
-            fetch(`/set_backlash?motor=${motor}&backlsh=${backlsh}`)
-                .then(response => response.text())
-                .then(data => alert(data));
-        }
-
-        function emergencyStop() {
-            fetch("/emergency_stop");
-            alert("Emergency Stop Activated!");
-        }
-
-        function moveMotor(motor) {
-            let dir = document.getElementById("dir" + motor).value;
-            let steps = document.getElementById("steps" + motor).value;
-            let velo = document.getElementById("velo" + motor).value;
-            let accel = document.getElementById("accel" + motor).value;
-            let command = "move:" + motor + "," + dir + "," + steps;            
-            fetch("/command?cmd=" + command)
-                .catch(error => console.error('Error:', error));
-        }
-
-        function sendCommand() {
-            let command = document.getElementById("cmd").value;
-            fetch("/command?cmd=" + command) 
-                .catch(error => console.error('Error:', error));
-        }
-    </script>
-</body>
-</html>
+function z(m){fetch('/set_position?motor='+m+'&pos=0')}
+function sendCmd(){fetch('/command?cmd='+document.getElementById('c').value)}
+</script>
+</body></html>
 )rawliteral";
 
 
 void setup() {
     Serial.begin(115200);
-    delay(1000); // Give serial time to initialize
-    Serial.println("\n\nESP32 Stepper Motor Controller Starting...");
+    delay(1000);
+    Serial.println("\nESP32 Motor Controller");
     
     preferences.begin("backlash", false);
     for (int i = 0; i < MOTOR_COUNT; i++) {
@@ -307,19 +217,19 @@ void setup() {
         motorPositions[i] = preferences.getLong(("motor" + String(i+1) + "_position").c_str(), motorPositions[i]);
         stepsPerUnit[i] = preferences.getFloat(("motor" + String(i+1) + "_res").c_str(), stepsPerUnit[i]);
         unitType[i] = preferences.getString(("motor" + String(i+1) + "_unit").c_str(), unitType[i]);
-        Serial.printf("Motor %d: Backlash=%d, Position=%ld, Resolution=%d %s\n", 
-                      i+1, motors[i].backlash, motorPositions[i], stepsPerUnit[i], unitType[i].c_str());
     }
     
+    // Start WiFi
     WiFi.begin(ssid, password);
     Serial.print("Connecting to WiFi");
     while (WiFi.status() != WL_CONNECTED) { 
-        delay(500); 
+        delay(500);
         Serial.print(".");
     }
-    Serial.println("\nWiFi connected!");
-    Serial.print("IP address: ");
+    Serial.println();
+    Serial.print("IP: ");
     Serial.println(WiFi.localIP());
+    Serial.println("Web interface with gamepad/keyboard support ready!");
     
     server.on("/", []() { 
         Serial.println("Serving webpage");
@@ -460,11 +370,14 @@ void setup() {
         pinMode(motors[i].enablePin, OUTPUT);
         digitalWrite(motors[i].enablePin, LOW);  // Enable motors
     }
+    
+    Serial.println("Ready! Open web interface to control motors.");
 }
 
 
 void loop() {
     server.handleClient();
+    
     if (Serial.available()) {
         String command = Serial.readStringUntil('\n');
         int separatorIndex = command.indexOf(':');
@@ -616,19 +529,19 @@ void processCommand(String command) {
 
 void moveSteps(int motorIndex, int steps, int maxSpeed, float accelTime) {
     digitalWrite(motors[motorIndex].enablePin, LOW); // Ensure motor is enabled
+    #if DEBUG_SERIAL
     Serial.printf("Motor %d | Steps: %d | Max Speed: %d | Accel Time %f\n", motorIndex + 1, steps, maxSpeed, accelTime);
+    #endif
 
     // If acceleration time is zero, skip acceleration/deceleration and run at max speed
     if (accelTime == 0.0 || accelTime < 0.001) {
         double minDelay = (1.0 / maxSpeed) * 1000000; // Convert to microseconds
-        Serial.printf("No acceleration - running at max speed: %f microseconds per step\n", minDelay);
         for (int i = 0; i < steps; i++) {
             digitalWrite(motors[motorIndex].stepPin, HIGH);
             delayMicroseconds(minDelay);
             digitalWrite(motors[motorIndex].stepPin, LOW);
             delayMicroseconds(minDelay);
         }
-        Serial.printf("Motor %d Movement Complete\n", motorIndex + 1);
         return;
     }
 
@@ -662,22 +575,9 @@ void moveSteps(int motorIndex, int steps, int maxSpeed, float accelTime) {
         }
     }
 
-    // Print results
-    if (optimal_M != -1) {
-        Serial.print("Optimal t: ");
-        Serial.print(optimal_t*1000000, 10);
-        Serial.println(" micro seconds");
-
-        Serial.print("maxDelay D: ");
-        Serial.print(sum_constant*1000000, 10);
-        Serial.println(" micro seconds");
-
-        Serial.print("minDelay d: ");
-        Serial.print(min_value*1000000, 10);
-        Serial.println(" micro seconds");
-    } else {
-        Serial.println("No valid solution found.");
-    }
+    #if DEBUG_SERIAL
+    if (optimal_M == -1) Serial.println("No valid solution found.");
+    #endif
     optimal_t = optimal_t*1000000;
     double maxDelay = sum_constant*1000000; // Start slow
     double stepDelay = maxDelay;
@@ -685,7 +585,6 @@ void moveSteps(int motorIndex, int steps, int maxSpeed, float accelTime) {
     int accelSteps = optimal_M;
     int cruiseSteps = steps - (optimal_M + optimal_M); // Remaining steps
     double minDelay = min_value*1000000;
-    Serial.printf("Motor %d | Accel: %d | Cruise: %d | Decel: %d | AccelTime: %f\n", motorIndex + 1, accelSteps, cruiseSteps, decelSteps, computed_sum);
 
     // **Acceleration Phase**
     for (int i = 0; i < accelSteps; i++) {
@@ -710,5 +609,5 @@ void moveSteps(int motorIndex, int steps, int maxSpeed, float accelTime) {
         digitalWrite(motors[motorIndex].stepPin, LOW);
         delayMicroseconds(stepDelay);
     }
-    Serial.printf("Motor %d Movement Complete\n", motorIndex + 1);
 }
+

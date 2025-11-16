@@ -3,6 +3,7 @@ from PyQt5.QtCore import Qt, QSettings, pyqtSignal, QTimer, QThread, QObject, QU
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PyQt5 import QtCore
 import sys
+import os
 import time
 import numpy as np
 import imageio
@@ -33,16 +34,29 @@ class MainWindow(QMainWindow):
         self.capture_timer.timeout.connect(self.capture_single_frame)
         self.is_capturing = False
         
+        # Setup tracking timer
+        self.tracking_timer = QTimer()
+        self.tracking_timer.timeout.connect(self.perform_tracking_update)
+        self.is_tracking = False
+        self.tracking_interval = 6000  # 6 seconds in milliseconds
+        
         # Initialize Qt Network Manager for async HTTP requests (no threads!)
         self.network_manager = QNetworkAccessManager(self)
-        self.network_manager.setTransferTimeout(500)  # 500ms timeout
+        self.network_manager.setTransferTimeout(5000)  # 5 second timeout (for motor movements)
         self.pending_requests = []  # Track pending network requests
         self.max_concurrent_requests = 5  # Limit concurrent requests
         self.is_closing = False  # Flag to prevent new requests during shutdown
         
+        # Hotspot calibration
+        self.hotspot_mask = None  # Will store the hot pixel values to subtract
+        self.calibration_frames = []  # Buffer for collecting calibration frames
+        self.is_calibrating = False  # Flag for calibration mode
+        self.dark_frame_path = "dark_frame.npy"  # Path to save/load dark frame
+        
         self.initUI()
         self.loadSettings()
         self.update_settings()
+        self.load_dark_frame()  # Load dark frame if available
         self.connect_camera()
 
 
@@ -83,9 +97,15 @@ class MainWindow(QMainWindow):
         esp32_ip_layout.addWidget(QLabel("ESP32 IP:"))
         esp32_ip_layout.addWidget(self.esp32_ip_edit)
         
+        # Arrow key hint label
+        self.arrow_key_hint = QLabel("⌨️ Arrow Keys: ↑↓ = Alt | ←→ = Azi | [ ] = Steps")
+        self.arrow_key_hint.setStyleSheet("color: #888888; font-size: 10px; padding: 5px;")
+        self.arrow_key_hint.setAlignment(Qt.AlignCenter)
+        
         # Create controls layout with fixed width
         controols = QVBoxLayout()
         controols.addLayout(esp32_ip_layout)
+        controols.addWidget(self.arrow_key_hint)
         controols.addWidget(self.dpad)
         controols.addWidget(self.motor1)
         controols.addWidget(self.motor2)
@@ -119,6 +139,7 @@ class MainWindow(QMainWindow):
         self.dpad.far_button.clicked.connect(self.far_clicked)
         self.dpad.track_button.clicked.connect(self.track_clicked)
         self.camera_controls.connect_camera.clicked.connect(self.connect_camera)
+        self.camera_controls.rm_hotspots_button.clicked.connect(self.calibrate_hotspots)
         self.camera_controls.capture_button.clicked.connect(self.capture_image)
         self.camera_controls.capture_mode_combobox.currentIndexChanged.connect(self.on_capture_mode_changed)
         self.camera_controls.red_slider.valueChanged.connect(self.update_color_correction)
@@ -188,6 +209,51 @@ class MainWindow(QMainWindow):
         self.logbox.setTextCursor(cursor)
         self.logbox.ensureCursorVisible()
 
+    def keyPressEvent(self, event):
+        """Handle arrow key presses for motor control and bracket keys for step adjustment"""
+        key = event.key()
+        
+        # Arrow Up = Motor 1 (Alt) Forward
+        if key == Qt.Key_Up:
+            self.up_clicked()
+        # Arrow Down = Motor 1 (Alt) Backward
+        elif key == Qt.Key_Down:
+            self.down_clicked()
+        # Arrow Left = Motor 2 (Azi) Forward
+        elif key == Qt.Key_Left:
+            self.left_clicked()
+        # Arrow Right = Motor 2 (Azi) Backward
+        elif key == Qt.Key_Right:
+            self.right_clicked()
+        # ] = Increase step size
+        elif key == Qt.Key_BracketRight:
+            self.adjust_step_size(100)
+        # [ = Decrease step size
+        elif key == Qt.Key_BracketLeft:
+            self.adjust_step_size(-100)
+        else:
+            # Pass other keys to parent handler
+            super().keyPressEvent(event)
+    
+    def adjust_step_size(self, delta):
+        """Adjust step size for all motors by delta amount"""
+        # Get current step value from U/D field
+        try:
+            current = int(self.dpad.ud_lineedit.text())
+        except ValueError:
+            current = 100  # Default if empty or invalid
+        
+        # Calculate new value (minimum 1 step)
+        new_value = max(1, current + delta)
+        new_text = str(new_value)
+        
+        # Update all step size fields
+        self.dpad.ud_lineedit.setText(new_text)
+        self.dpad.lr_lineedit.setText(new_text)
+        self.dpad.nf_lineedit.setText(new_text)
+        
+        print(f"Step size adjusted to: {new_value} steps")
+
     def closeEvent(self, event):
         """ Triggered when the window is closed, used to save settings. """
         # Set closing flag to prevent new requests
@@ -200,6 +266,11 @@ class MainWindow(QMainWindow):
         # Stop continuous capture if running
         if self.is_capturing:
             self.stop_continuous_capture()
+        
+        # Stop tracking if running
+        if hasattr(self, 'is_tracking') and self.is_tracking:
+            self.is_tracking = False
+            self.tracking_timer.stop()
         
         # Abort all pending network requests
         if hasattr(self, 'pending_requests'):
@@ -397,16 +468,16 @@ class MainWindow(QMainWindow):
         print("Motor settings sent to ESP32")
 
     def up_clicked(self):
-        """Move Motor 1 (Alt) Forward"""
+        """Move Motor 1 (Alt) Backward (reversed for inverted mount)"""
         steps = self.dpad.ud_lineedit.text()
-        command = f"move:1,F,{steps}"
+        command = f"move:1,B,{steps}"
         self.send_http_request("/command", {"cmd": command})
         print(f"Moving Alt up: {steps} steps")
 
     def down_clicked(self):
-        """Move Motor 1 (Alt) Backward"""
+        """Move Motor 1 (Alt) Forward (reversed for inverted mount)"""
         steps = self.dpad.ud_lineedit.text()
-        command = f"move:1,B,{steps}"
+        command = f"move:1,F,{steps}"
         self.send_http_request("/command", {"cmd": command})
         print(f"Moving Alt down: {steps} steps")
 
@@ -435,33 +506,187 @@ class MainWindow(QMainWindow):
         print(f"Far/Focus not connected to ESP32 motor")
 
     def track_clicked(self):
-        #if !track.isChecked(): closee thread
-        t0 = time.time()
-        # x,y = self.get_position()
-        #imgs = get_imgs(ROI, exposure_time, gain, num_images, update=True)
-        #for i in range (1, imgs.shape[0]):
-        #   self.tracked_points+=1
-        #   dx,dy = registration(imgs[i-1], imga[i])
-            # self.trajectory[self.tracked_points+1][0]+=self.trajectory[self.tracked_points][0]+dx
-            # self.trajectory[self.tracked_points+1][1]+=self.trajectory[self.tracked_points][1]+dy
-            # self.trajectory[self.tracked_points+1][2]+=self.trajectory[self.tracked_points][2]+time.time()
-
-        #predict(t) = predict_trajectory(self.trajectory)
-        #t_overhead = 0.5 
-        #x,y = predict(t_overhead+time.time()-t0) 
-        #command ="{1},{200},{x>1?1:0},{abs(x)},{300},{0},{backlash}\n"
-        # self.esp32.write(command.encode())
-
-        # while tracking.isChecked():
-            #start_thread(period=5):
-            #when available:
-                #get tracking_image (ROI,exposure time, gain, 1, show=False)
-                #calculate and append dx, dy, t to self.trajectory. 
-                #update predict(t) = predict_trajectory(self.trajectory)
-
-        #plot X vs t, y vs t, X vs Y
-
-        pass
+        """Toggle star tracking on/off"""
+        if self.dpad.track_button.isChecked():
+            # Start tracking
+            self.is_tracking = True
+            print("=" * 60)
+            print("STAR TRACKING STARTED")
+            print(f"Update interval: {self.tracking_interval/1000} seconds")
+            print(f"Max U/D steps: {self.dpad.ud_lineedit.text()}")
+            print(f"Max L/R steps: {self.dpad.lr_lineedit.text()}")
+            print("Monitoring left ROI for bright spot...")
+            print("=" * 60)
+            
+            # Ensure continuous capture is running for tracking
+            if not self.is_capturing:
+                print("Starting continuous capture for tracking...")
+                self.camera_controls.capture_mode_combobox.setCurrentText("Continuous")
+                self.start_continuous_capture()
+            
+            # Perform first tracking update immediately
+            self.perform_tracking_update()
+            
+            # Start timer for subsequent updates
+            self.tracking_timer.start(self.tracking_interval)
+        else:
+            # Stop tracking
+            self.is_tracking = False
+            self.tracking_timer.stop()
+            # Hide the crosshair
+            self.imgplot.update_star_crosshair(0, 0, visible=False)
+            print("=" * 60)
+            print("STAR TRACKING STOPPED")
+            print("=" * 60)
+    
+    def perform_tracking_update(self):
+        """Analyze ROI and issue correction commands"""
+        if not self.is_tracking:
+            return
+        
+        # Make sure we have an image with ROI data
+        if not hasattr(self.imgplot, 'image_data') or self.imgplot.image_data is None:
+            print("No image available for tracking")
+            return
+        
+        try:
+            # Get ROI1 (left box) using pyqtgraph's proper method
+            image_data = self.imgplot.image_data
+            
+            # Use getArraySlice to properly extract the ROI region
+            roi_slice, roi_transform = self.imgplot.ROI1.getArraySlice(image_data, self.imgplot.image_item)
+            
+            if roi_slice is None:
+                print("ROI is outside image bounds")
+                return
+            
+            # Extract the ROI data
+            roi_img = image_data[roi_slice]
+            
+            if roi_img.size == 0:
+                print("ROI is outside image bounds")
+                return
+            
+            # Get ROI position for coordinate transformation
+            roi_pos = self.imgplot.ROI1.pos()
+            x, y = int(roi_pos[0]), int(roi_pos[1])
+            
+            # Convert to grayscale if image is in color
+            if len(roi_img.shape) == 3:
+                gray = np.dot(roi_img[..., :3], [0.114, 0.587, 0.299])  # BGR to grayscale
+            else:
+                gray = roi_img
+            
+            # Find the star using weighted centroid of bright pixels
+            # This is more robust than single brightest pixel (which could be noise)
+            
+            # Get the maximum brightness value
+            max_brightness = np.max(gray)
+            
+            # Set threshold at 80% of max brightness to filter out noise (more aggressive)
+            threshold = max_brightness * 0.8
+            print(f"  Max brightness in ROI: {max_brightness:.0f}, threshold: {threshold:.0f}")
+            
+            # Create mask of pixels above threshold
+            bright_mask = gray >= threshold
+            
+            # Check if we found any bright pixels
+            if not np.any(bright_mask):
+                print("  No bright object found in ROI (all pixels below threshold)")
+                return
+            
+            # Calculate weighted centroid of bright pixels
+            # This gives us the center of the bright region (the star)
+            y_coords, x_coords = np.where(bright_mask)
+            weights = gray[bright_mask]
+            
+            # Check the spatial extent of the bright region to filter out noise
+            x_min, x_max = np.min(x_coords), np.max(x_coords)
+            y_min, y_max = np.min(y_coords), np.max(y_coords)
+            width_extent = x_max - x_min + 1
+            height_extent = y_max - y_min + 1
+            diameter = max(width_extent, height_extent)
+            
+            # Require object to be at least 5 pixels in diameter
+            if diameter < 5:
+                print(f"  Object too small ({diameter} pixels), likely noise. Need at least 5 pixels.")
+                return
+            
+            star_x = np.average(x_coords, weights=weights)
+            star_y = np.average(y_coords, weights=weights)
+            
+            # Print brightness info for debugging
+            num_bright_pixels = np.sum(bright_mask)
+            print(f"  Found {num_bright_pixels} bright pixels (diameter: {diameter}px)")
+            print(f"  Object bounding box in ROI: X=[{x_min}, {x_max}], Y=[{y_min}, {y_max}]")
+            
+            # Get ROI dimensions
+            roi_height, roi_width = gray.shape if len(gray.shape) == 2 else gray.shape[:2]
+            
+            # Update crosshair to show tracked star position (in image coordinates)
+            star_x_img = x + star_x
+            star_y_img = y + star_y
+            self.imgplot.update_star_crosshair(star_x_img, star_y_img, visible=True)
+            
+            print(f"  ROI position: ({x}, {y}), size: ({roi_width}, {roi_height})")
+            print(f"  Star centroid in ROI coords: ({star_x:.1f}, {star_y:.1f})")
+            print(f"  Star centroid in image coords: ({star_x_img:.1f}, {star_y_img:.1f})")
+            
+            # Calculate center of ROI
+            center_x = roi_width / 2
+            center_y = roi_height / 2
+            
+            # Calculate pixel offset from center
+            offset_x = star_x - center_x  # Positive = star is right of center
+            offset_y = star_y - center_y  # Positive = star is below center
+            
+            print(f"\n{'='*50}")
+            print(f"TRACKING UPDATE")
+            print(f"  Offset from ROI center: X={offset_x:.1f}px, Y={offset_y:.1f}px")
+            
+            # Get maximum step sizes from UI
+            try:
+                max_ud_steps = int(self.dpad.ud_lineedit.text())
+                max_lr_steps = int(self.dpad.lr_lineedit.text())
+            except ValueError:
+                print("  Error: Invalid step size in U/D or L/R fields")
+                return
+            
+            # Calculate required steps (scale pixel offset to motor steps)
+            # Assume roughly linear relationship: max offset = half ROI size = max steps
+            # This gives: steps = offset * (max_steps / (roi_size/2))
+            steps_x = int(offset_x * max_lr_steps / (roi_width / 2))
+            steps_y = int(offset_y * max_ud_steps / (roi_height / 2))
+            
+            # Clamp to maximum step sizes
+            steps_x = max(min(steps_x, max_lr_steps), -max_lr_steps)
+            steps_y = max(min(steps_y, max_ud_steps), -max_ud_steps)
+            
+            # Determine movement directions
+            # Positive offset_x = star right of center = need to move RIGHT (motor 2 backward)
+            # Negative offset_x = star left of center = need to move LEFT (motor 2 forward)
+            # Positive offset_y = star below center = need to move UP (motor 1 forward)
+            # Negative offset_y = star above center = need to move DOWN (motor 1 backward)
+            
+            # Issue correction commands
+            if abs(steps_y) > 5:  # Only move if offset is significant (>5 steps)
+                direction_ud = "F" if steps_y > 0 else "B"  # UP/DOWN normal
+                command = f"move:1,{direction_ud},{abs(steps_y)}"
+                print(f"  Altitude correction: {abs(steps_y)} steps {'UP' if steps_y > 0 else 'DOWN'}")
+                self.send_http_request("/command", {"cmd": command})
+            else:
+                print(f"  Altitude: centered (offset {steps_y} steps)")
+            
+            if abs(steps_x) > 5:  # Only move if offset is significant (>5 steps)
+                direction_lr = "B" if steps_x > 0 else "F"  # LEFT/RIGHT inverted
+                command = f"move:2,{direction_lr},{abs(steps_x)}"
+                print(f"  Azimuth correction: {abs(steps_x)} steps {'RIGHT' if steps_x > 0 else 'LEFT'}")
+                self.send_http_request("/command", {"cmd": command})
+            else:
+                print(f"  Azimuth: centered (offset {steps_x} steps)")
+            
+        except Exception as e:
+            print(f"Tracking error: {e}")
 
     def connect_camera(self):
         try: 
@@ -473,13 +698,180 @@ class MainWindow(QMainWindow):
                 self.camera_controls.connect_status.setText("Disconnected")
                 self.camList.Clear()
                 self.system.ReleaseInstance()
-                # sys.exit(1)
+                return  # Exit early if no camera found
+            
+            # Camera found - initialize it
             self.camera_controls.connect_status.setText("Connected")
             self.cam = self.camList[0]
             self.cam.Init()
-        except:
-            print("no camera connected")
+            
+            # Configure camera for long exposures immediately after init
+            try:
+                nodemap = self.cam.GetNodeMap()
+                s_nodemap = self.cam.GetTLStreamNodeMap()
+                
+                # Configure stream layer for long exposures
+                try:
+                    # Set stream buffer count mode to manual
+                    stream_buffer_count_mode = PySpin.CEnumerationPtr(s_nodemap.GetNode('StreamBufferCountMode'))
+                    if PySpin.IsAvailable(stream_buffer_count_mode) and PySpin.IsWritable(stream_buffer_count_mode):
+                        stream_buffer_count_mode.SetIntValue(stream_buffer_count_mode.GetEntryByName('Manual').GetValue())
+                        print("Stream buffer count mode set to Manual")
+                    
+                    # Increase buffer count for long exposures
+                    stream_buffer_count = PySpin.CIntegerPtr(s_nodemap.GetNode('StreamBufferCountManual'))
+                    if PySpin.IsAvailable(stream_buffer_count) and PySpin.IsWritable(stream_buffer_count):
+                        stream_buffer_count.SetValue(10)
+                        print("Stream buffer count set to 10")
+                    
+                    # Set buffer handling mode to NewestOnly to prevent memory issues
+                    stream_buffer_handling = PySpin.CEnumerationPtr(s_nodemap.GetNode('StreamBufferHandlingMode'))
+                    if PySpin.IsAvailable(stream_buffer_handling) and PySpin.IsWritable(stream_buffer_handling):
+                        stream_buffer_handling.SetIntValue(stream_buffer_handling.GetEntryByName('NewestOnly').GetValue())
+                        print("Stream buffer handling mode set to NewestOnly")
+                except Exception as stream_error:
+                    print(f"Warning: Could not configure stream settings: {stream_error}")
+                
+                # Disable frame rate control to allow long exposures
+                try:
+                    frame_rate_enable = PySpin.CBooleanPtr(nodemap.GetNode('AcquisitionFrameRateEnable'))
+                    if PySpin.IsAvailable(frame_rate_enable) and PySpin.IsWritable(frame_rate_enable):
+                        frame_rate_enable.SetValue(False)
+                        print("Frame rate control disabled - long exposures enabled")
+                except:
+                    # Try alternative node name
+                    try:
+                        frame_rate_auto = PySpin.CEnumerationPtr(nodemap.GetNode('AcquisitionFrameRateAuto'))
+                        if PySpin.IsAvailable(frame_rate_auto) and PySpin.IsWritable(frame_rate_auto):
+                            frame_rate_auto.SetIntValue(frame_rate_auto.GetEntryByName('Off').GetValue())
+                            print("Frame rate auto set to Off - long exposures enabled")
+                    except:
+                        print("Could not disable frame rate control (may not be available)")
+                
+                # Set frame rate to very low value (0.1 fps = 10 second max exposure theoretically)
+                try:
+                    frame_rate = PySpin.CFloatPtr(nodemap.GetNode('AcquisitionFrameRate'))
+                    if PySpin.IsAvailable(frame_rate) and PySpin.IsWritable(frame_rate):
+                        frame_rate_min = frame_rate.GetMin()
+                        frame_rate.SetValue(frame_rate_min)
+                        print(f"Frame rate set to minimum: {frame_rate_min} fps")
+                except Exception as fr_error:
+                    print(f"Could not set frame rate: {fr_error}")
+                
+                # Disable trigger mode
+                try:
+                    trigger_mode = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerMode'))
+                    if PySpin.IsAvailable(trigger_mode) and PySpin.IsWritable(trigger_mode):
+                        trigger_mode.SetIntValue(trigger_mode.GetEntryByName('Off').GetValue())
+                        print("Trigger mode disabled")
+                except:
+                    pass
+                    
+            except Exception as config_error:
+                print(f"Warning: Could not fully configure camera: {config_error}")
+            
+            # Enable hotspot calibration button
+            self.camera_controls.rm_hotspots_button.setEnabled(True)
+            
+            print("Camera connected and initialized")
+        except Exception as e:
+            print(f"Error connecting camera: {e}")
+            self.camera_controls.connect_status.setText("Disconnected")
+            self.camera_controls.rm_hotspots_button.setEnabled(False)
 
+    def load_dark_frame(self):
+        """Load dark frame from disk if available"""
+        try:
+            if os.path.exists(self.dark_frame_path):
+                self.hotspot_mask = np.load(self.dark_frame_path)
+                print("=" * 60)
+                print("DARK FRAME LOADED FROM DISK")
+                print(f"File: {self.dark_frame_path}")
+                mean_value = np.mean(self.hotspot_mask)
+                max_value = np.max(self.hotspot_mask)
+                print(f"Dark frame stats: Mean={mean_value:.1f}, Max={max_value:.1f}")
+                print("Dark frame will be subtracted from all images")
+                print("=" * 60)
+            else:
+                print(f"No saved dark frame found at {self.dark_frame_path}")
+        except Exception as e:
+            print(f"Error loading dark frame: {e}")
+            self.hotspot_mask = None
+    
+    def save_dark_frame(self):
+        """Save dark frame to disk"""
+        try:
+            if self.hotspot_mask is not None:
+                np.save(self.dark_frame_path, self.hotspot_mask)
+                print(f"Dark frame saved to {self.dark_frame_path}")
+        except Exception as e:
+            print(f"Error saving dark frame: {e}")
+    
+    def calibrate_hotspots(self):
+        """Start dark frame calibration using 10 frames (lens cap on)"""
+        print("=" * 60)
+        print("DARK FRAME CALIBRATION STARTED")
+        print("*** PUT LENS CAP ON NOW ***")
+        print("Collecting 10 frames to create dark frame...")
+        print("=" * 60)
+        
+        # Reset calibration data
+        self.calibration_frames = []
+        self.is_calibrating = True
+        self.hotspot_mask = None
+        
+        # Set button text to show calibration is in progress
+        self.camera_controls.rm_hotspots_button.setText("Calibrating...")
+        self.camera_controls.rm_hotspots_button.setEnabled(False)
+        
+        # Start continuous capture if not already running
+        was_capturing = self.is_capturing
+        if not was_capturing:
+            self.camera_controls.capture_mode_combobox.setCurrentText("Continuous")
+            self.start_continuous_capture()
+        
+        # Timer will automatically stop after 10 frames are collected
+        # (handled in capture_single_frame)
+    
+    def finish_hotspot_calibration(self):
+        """Process collected frames to create dark frame (average of all frames)"""
+        if len(self.calibration_frames) < 10:
+            print(f"Error: Only collected {len(self.calibration_frames)} frames")
+            self.is_calibrating = False
+            self.camera_controls.rm_hotspots_button.setText("Dark Frame")
+            self.camera_controls.rm_hotspots_button.setEnabled(True)
+            return
+        
+        print("Creating dark frame from collected images...")
+        
+        # Convert frames to numpy array and calculate mean
+        # This creates a dark frame by averaging all the lens-cap-on images
+        frames = np.array(self.calibration_frames)  # Shape: (10, height, width, [channels])
+        
+        # Calculate average across all frames - this is our dark frame
+        self.hotspot_mask = np.mean(frames, axis=0).astype(np.float32)
+        
+        # Calculate some statistics for user feedback
+        mean_value = np.mean(self.hotspot_mask)
+        max_value = np.max(self.hotspot_mask)
+        
+        print("=" * 60)
+        print(f"DARK FRAME CALIBRATION COMPLETE")
+        print(f"Created dark frame from {len(self.calibration_frames)} frames")
+        print(f"Dark frame stats: Mean={mean_value:.1f}, Max={max_value:.1f}")
+        print(f"Dark frame will be subtracted from all subsequent images")
+        print("*** YOU CAN REMOVE THE LENS CAP NOW ***")
+        print("=" * 60)
+        
+        # Save dark frame to disk
+        self.save_dark_frame()
+        
+        # Clean up
+        self.calibration_frames = []
+        self.is_calibrating = False
+        self.camera_controls.rm_hotspots_button.setText("Dark Frame")
+        self.camera_controls.rm_hotspots_button.setEnabled(True)
+    
     def on_capture_mode_changed(self):
         """Handle mode change - stop continuous capture if switching away from it"""
         if self.is_capturing:
@@ -560,6 +952,34 @@ class MainWindow(QMainWindow):
         nodemap = self.cam.GetNodeMap()
         # Set exposure time
         try:
+            # First, disable frame rate control to allow long exposures
+            try:
+                frame_rate_enable = PySpin.CBooleanPtr(nodemap.GetNode('AcquisitionFrameRateEnable'))
+                if PySpin.IsAvailable(frame_rate_enable) and PySpin.IsWritable(frame_rate_enable):
+                    frame_rate_enable.SetValue(False)
+                    if not is_continuous:
+                        print("Disabled frame rate control to allow long exposures")
+            except:
+                # Try alternative node name
+                try:
+                    frame_rate_auto = PySpin.CEnumerationPtr(nodemap.GetNode('AcquisitionFrameRateAuto'))
+                    if PySpin.IsAvailable(frame_rate_auto) and PySpin.IsWritable(frame_rate_auto):
+                        frame_rate_auto.SetIntValue(frame_rate_auto.GetEntryByName('Off').GetValue())
+                        if not is_continuous:
+                            print("Set frame rate auto to Off")
+                except:
+                    pass  # Frame rate control might not be available
+            
+            # Ensure trigger mode is off for free-running capture
+            try:
+                trigger_mode = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerMode'))
+                if PySpin.IsAvailable(trigger_mode) and PySpin.IsWritable(trigger_mode):
+                    trigger_mode.SetIntValue(trigger_mode.GetEntryByName('Off').GetValue())
+                    if not is_continuous:
+                        print("Set trigger mode to Off")
+            except:
+                pass
+            
             exposure_auto = PySpin.CEnumerationPtr(nodemap.GetNode('ExposureAuto'))
             if PySpin.IsAvailable(exposure_auto) and PySpin.IsWritable(exposure_auto):
                 exposure_auto.SetIntValue(exposure_auto.GetEntryByName('Off').GetValue())
@@ -576,18 +996,30 @@ class MainWindow(QMainWindow):
                 exposure_max = exposure_node.GetMax()
                 # Ensure exposure_time is within valid range
                 requested_exposure = exposure_time
-                exposure_time = max(min(exposure_time, exposure_max), exposure_min)
+                was_clamped = False
+                
+                if exposure_time > exposure_max:
+                    exposure_time = exposure_max
+                    was_clamped = True
+                    if not is_continuous:
+                        print(f"WARNING: Requested exposure {requested_exposure} µs exceeds camera maximum!")
+                        print(f"         Setting to maximum: {exposure_max} µs ({exposure_max/1000:.3f} ms)")
+                elif exposure_time < exposure_min:
+                    exposure_time = exposure_min
+                    was_clamped = True
+                    if not is_continuous:
+                        print(f"WARNING: Requested exposure {requested_exposure} µs below camera minimum!")
+                        print(f"         Setting to minimum: {exposure_min} µs")
+                
                 exposure_node.SetValue(exposure_time)
                 
                 # Read back the actual value set
                 actual_exposure = exposure_node.GetValue()
                 
                 # Only print if not in continuous mode to reduce spam
-                if not is_continuous:
-                    print(f"Requested exposure: {requested_exposure} µs")
-                    print(f"Clamped to valid range: {exposure_time} µs")
-                    print(f"Actual value set on camera: {actual_exposure} µs ({actual_exposure/1000:.3f} ms)")
-                    print(f"Valid camera range: {exposure_min} - {exposure_max} µs")
+                if not is_continuous and not was_clamped:
+                    print(f"Exposure set to: {actual_exposure} µs ({actual_exposure/1000:.3f} ms)")
+                    print(f"Camera range: {exposure_min/1000:.1f} - {exposure_max/1000:.1f} ms")
             else:
                 if not is_continuous:
                     print("Exposure time node not available/writable")
@@ -641,19 +1073,39 @@ class MainWindow(QMainWindow):
                 # Reset the camera if needed (only for single frame mode)
                 if not is_continuous:
                     self.cam.DeInit()
+                    time.sleep(0.2)  # Wait for camera to fully deinitialize
                     self.cam.Init()
-                    time.sleep(0.1)  # Give camera time to initialize
+                    time.sleep(0.3)  # Give camera time to initialize
 
                 # Begin new acquisition
                 self.cam.BeginAcquisition()
+                time.sleep(0.1)  # Wait for acquisition to start
+                if not is_continuous:
+                    print("Acquisition started, waiting for image...")
 
             image_np = None
 
             # Create an image processor instance
             image_processor = PySpin.ImageProcessor()
 
-            # Acquire image with timeout
-            image_result = self.cam.GetNextImage(1000 if is_continuous else 3000)
+            # Calculate timeout based on exposure time with generous buffer
+            # For short exposures: exposure + 3 seconds
+            # For long exposures (>1s): exposure * 2 + 5 seconds (double exposure time plus buffer)
+            if exposure_time > 1000000:  # If exposure > 1 second
+                timeout_ms = int(exposure_time / 1000 * 2) + 5000
+            else:
+                timeout_ms = max(3000, int(exposure_time / 1000) + 3000)
+            
+            # Inform user about long exposure
+            if not is_continuous and exposure_time >= 500000:  # 500ms or longer
+                if exposure_time >= 1000000:  # 1 second or more
+                    print(f"Long exposure: {exposure_time/1000000:.1f} seconds. Please wait...")
+                    print(f"Using {timeout_ms/1000:.1f} second timeout")
+                else:
+                    print(f"Long exposure: {exposure_time/1000:.0f} ms. Please wait...")
+            
+            # Acquire image with timeout (use calculated timeout for both modes)
+            image_result = self.cam.GetNextImage(timeout_ms)
             if image_result.IsIncomplete():
                 print("Image incomplete with status %d" % image_result.GetImageStatus())
             else:
@@ -686,6 +1138,32 @@ class MainWindow(QMainWindow):
                 self.cam.EndAcquisition()
 
             if image_np is not None:
+                # Collect frames for dark frame calibration
+                if self.is_calibrating and len(self.calibration_frames) < 10:
+                    self.calibration_frames.append(image_np.copy())
+                    print(f"Dark frame {len(self.calibration_frames)}/10 collected")
+                    
+                    if len(self.calibration_frames) == 10:
+                        # Stop capture and process calibration
+                        self.stop_continuous_capture()
+                        self.finish_hotspot_calibration()
+                
+                # Apply dark frame subtraction if available
+                if self.hotspot_mask is not None and not self.is_calibrating:
+                    # Subtract dark frame (clip to prevent negative values)
+                    # Handle both grayscale and color images
+                    if len(image_np.shape) == 3 and len(self.hotspot_mask.shape) == 2:
+                        # Color image with grayscale dark frame - subtract from each channel
+                        image_np = image_np.astype(np.float32)
+                        for i in range(image_np.shape[2]):
+                            image_np[:, :, i] = np.clip(image_np[:, :, i] - self.hotspot_mask, 0, 255)
+                        image_np = image_np.astype(np.uint8)
+                    elif image_np.shape == self.hotspot_mask.shape:
+                        # Same shape - direct subtraction
+                        image_np = np.clip(image_np.astype(np.float32) - self.hotspot_mask, 0, 255).astype(np.uint8)
+                    else:
+                        print(f"Warning: Dark frame shape {self.hotspot_mask.shape} doesn't match image shape {image_np.shape}. Skipping subtraction.")
+                
                 self.display_image(image_np)
 
         except Exception as e:
@@ -699,7 +1177,7 @@ class MainWindow(QMainWindow):
                 self.cam.Init()
             except Exception as recovery_error:
                 print(f"Error during recovery: {recovery_error}")
-            self.display_image(image_np)
+            # Don't try to display image_np if it failed - it may be None
 
     def update_color_correction(self):
         """Update color correction labels and apply to current image"""
@@ -733,6 +1211,9 @@ class MainWindow(QMainWindow):
         
         # Update the display
         self.imgplot.image_item.setImage(corrected_image)
+        
+        # Update pixel info display if mouse is hovering
+        self.imgplot.update_pixel_info()
 
 
     def display_image(self, image_np):
@@ -740,6 +1221,15 @@ class MainWindow(QMainWindow):
         Convert the NumPy image (which might be grayscale or color) to a QImage
         and display it in the QLabel.
         """
+        # Safety check: make sure we have a valid image
+        if image_np is None:
+            print("Warning: Cannot display None image")
+            return
+        
+        if not isinstance(image_np, np.ndarray) or image_np.size == 0:
+            print("Warning: Invalid image data")
+            return
+        
         # if len(image_np.shape) == 2:  # Grayscale image
         #     height, width = image_np.shape
         #     qimage = QImage(image_np.tobytes(), width, height, width, QImage.Format_Grayscale8)
@@ -753,7 +1243,9 @@ class MainWindow(QMainWindow):
             self.apply_color_correction()
         else:
             self.imgplot.image_item.setImage(image_np)
-
+        
+        # Update pixel info display if mouse is hovering
+        self.imgplot.update_pixel_info()
 
         # Resize ROIs if this is the first image
         if not hasattr(self, 'rois_initialized'):
@@ -790,19 +1282,44 @@ class MainWindow(QMainWindow):
 
 
     def disconnec_camera(self):
-        # Properly deinitialize and release the camera.
+        # Properly deinitialize and release the camera in correct order.
+        # Order matters: camera -> camList -> system
         try:
+            # Step 1: Stop streaming and deinitialize camera
             if hasattr(self, 'cam') and self.cam is not None:
-                if self.cam.IsStreaming():
-                    self.cam.EndAcquisition()
-                self.cam.DeInit()
+                try:
+                    if self.cam.IsStreaming():
+                        self.cam.EndAcquisition()
+                    self.cam.DeInit()
+                except Exception as e:
+                    print(f"Error deinitializing camera: {e}")
+                # Delete the camera reference
                 del self.cam
+                self.cam = None
+            
+            # Step 2: Clear the camera list (releases camera references)
             if hasattr(self, 'camList') and self.camList is not None:
-                self.camList.Clear()
+                try:
+                    self.camList.Clear()
+                    # Small delay to ensure references are released
+                    time.sleep(0.1)
+                except Exception as e:
+                    print(f"Error clearing camera list: {e}")
+                # Delete the camera list reference
+                del self.camList
+                self.camList = None
+            
+            # Step 3: Release the system instance (must be last)
             if hasattr(self, 'system') and self.system is not None:
-                self.system.ReleaseInstance()
+                try:
+                    self.system.ReleaseInstance()
+                except Exception as e:
+                    print(f"Error releasing system: {e}")
+                # Don't delete system - ReleaseInstance handles it
+                
+            print("Camera disconnected successfully")
         except Exception as e:
-            print(f"Error disconnecting camera: {e}")
+            print(f"Unexpected error disconnecting camera: {e}")
 
     def best_fit_curve(x, y, t, degree=2):
         """

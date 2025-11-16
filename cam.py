@@ -19,8 +19,11 @@ class Controls(QWidget):
         connection_layout = QHBoxLayout()
         self.connect_camera = QPushButton("Connect Camera")
         self.connect_status = QLabel("Disconnected")
+        self.rm_hotspots_button = QPushButton("Dark Frame")
+        self.rm_hotspots_button.setEnabled(False)  # Disabled until camera connected
         connection_layout.addWidget(self.connect_camera)
         connection_layout.addWidget(self.connect_status)
+        connection_layout.addWidget(self.rm_hotspots_button)
         self.layout.addLayout(connection_layout)
 
         # Exposure Time row
