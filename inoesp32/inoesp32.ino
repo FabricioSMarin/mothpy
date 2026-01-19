@@ -28,9 +28,13 @@ Preferences preferences;
 // #define DIR_PIN_3  22
 // #define ENABLE_PIN_3 19
 
-#define STEP_PIN_1 5
-#define DIR_PIN_1  4
-#define ENABLE_PIN_1 19
+// #define STEP_PIN_1 5
+// #define DIR_PIN_1  4
+// #define ENABLE_PIN_1 19
+
+#define STEP_PIN_1 17
+#define DIR_PIN_1  16
+#define ENABLE_PIN_1 18
 
 // #define STEP_PIN_2 17
 // #define DIR_PIN_2  16
