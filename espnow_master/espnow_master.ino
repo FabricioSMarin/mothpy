@@ -10,6 +10,17 @@
 #define BUTTON_PIN 0
 #define ANALOG_Y_PIN 1
 #define ANALOG_X_PIN 2
+#define IR_LED_PIN 21  // XIAO D3; drives the transistor base resistor
+
+// Sony camera IR shutter (SIRC-20, LSB-first)
+// Address 0x1E3A + command 0x2D => raw 0xF1D2D
+// Note: 0xB4B8F is the bit-reversed form used by MSB-first libraries — do not use it here.
+const uint16_t SONY_SHUTTER_ADDRESS = 0x1E3A;
+const uint8_t SONY_SHUTTER_COMMAND = 0x2D;
+const uint8_t SONY_SHUTTER_BITS = 20;
+const uint8_t SONY_FRAME_COUNT = 5;
+const uint32_t SONY_FRAME_PERIOD_US = 45000;
+const uint32_t SHUTTER_DEBOUNCE_MS = 250;
 
 // ESP-NOW peer MAC address (update with your client's MAC address)
 // Client MAC: CC:DB:A7:9F:63:9C
@@ -38,6 +49,49 @@ int max_velocity = 50000;        // Maximum steps per second
 // Timing
 unsigned long lastSendTime = 0;
 const unsigned long sendInterval = 50;  // Send commands every 50ms (20Hz)
+bool espNowReady = false;
+bool previousButtonPressed = false;
+unsigned long lastShutterTime = 0;
+
+// Turn the hardware-generated 40 kHz carrier on for a Sony SIRC mark.
+void sendIrMark(uint32_t durationUs) {
+  ledcWrite(IR_LED_PIN, 64);  // 25% duty cycle at 8-bit resolution
+  delayMicroseconds(durationUs);
+  ledcWrite(IR_LED_PIN, 0);
+}
+
+void sendSonyFrame(uint32_t data, uint8_t numberOfBits) {
+  sendIrMark(2400);
+  delayMicroseconds(600);
+
+  // Sony SIRC transmits the least-significant bit first.
+  for (uint8_t bit = 0; bit < numberOfBits; bit++) {
+    sendIrMark((data & 1U) ? 1200 : 600);
+    delayMicroseconds(600);
+    data >>= 1;
+  }
+}
+
+void fireSonyShutter() {
+  // Pack as: 7-bit command | 13-bit address (device + extended)
+  const uint32_t shutterCode =
+      ((uint32_t)SONY_SHUTTER_ADDRESS << 7) | (SONY_SHUTTER_COMMAND & 0x7F);
+
+  Serial.print("IR: Sony shutter 0x");
+  Serial.println(shutterCode, HEX);
+
+  for (uint8_t frame = 0; frame < SONY_FRAME_COUNT; frame++) {
+    uint32_t frameStart = micros();
+    sendSonyFrame(shutterCode, SONY_SHUTTER_BITS);
+
+    if (frame + 1 < SONY_FRAME_COUNT) {
+      uint32_t elapsed = micros() - frameStart;
+      if (elapsed < SONY_FRAME_PERIOD_US) {
+        delayMicroseconds(SONY_FRAME_PERIOD_US - elapsed);
+      }
+    }
+  }
+}
 
 // Callback when data is sent (ESP32 Arduino core v2.x+ with ESP-IDF 5.x)
 // ESP-IDF 5.x requires wifi_tx_info_t* instead of uint8_t* for the first parameter
@@ -72,6 +126,10 @@ void setup() {
   
   // Configure joystick pins
   pinMode(BUTTON_PIN, INPUT_PULLUP);  // Button with pullup (GPIO0, ADC-capable)
+  if (!ledcAttach(IR_LED_PIN, 40000, 8)) {
+    Serial.println("Error initializing IR output");
+  }
+  ledcWrite(IR_LED_PIN, 0);
   // Analog pins (GPIO1, GPIO2) don't need pinMode on ESP32C6 - analogRead() works directly
   // ESP32C6 ADC1 channels: GPIO0-6 are all ADC-capable (12-bit, 0-4095)
   
@@ -87,28 +145,27 @@ void setup() {
   
   // Initialize ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-NOW");
-    return;
+    Serial.println("Error initializing ESP-NOW; IR shutter remains available");
+  } else {
+    // Register callbacks
+    esp_now_register_send_cb(OnDataSent);
+    esp_now_register_recv_cb(OnDataRecv);
+
+    // Add peer (broadcast initially to find client)
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, clientMacAddress, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+      Serial.println("Failed to add ESP-NOW peer; IR shutter remains available");
+    } else {
+      espNowReady = true;
+      Serial.println("ESP-NOW initialized. Waiting for client...");
+      Serial.println("NOTE: Update clientMacAddress[] in code with client's MAC address");
+      Serial.println("      Or use broadcast (0xFF,0xFF,0xFF,0xFF,0xFF,0xFF) if client is in pairing mode");
+    }
   }
-  
-  // Register callbacks
-  esp_now_register_send_cb(OnDataSent);
-  esp_now_register_recv_cb(OnDataRecv);
-  
-  // Add peer (broadcast initially to find client)
-  esp_now_peer_info_t peerInfo;
-  memcpy(peerInfo.peer_addr, clientMacAddress, 6);
-  peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-  
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("Failed to add peer");
-    return;
-  }
-  
-  Serial.println("ESP-NOW initialized. Waiting for client...");
-  Serial.println("NOTE: Update clientMacAddress[] in code with client's MAC address");
-  Serial.println("      Or use broadcast (0xFF,0xFF,0xFF,0xFF,0xFF,0xFF) if client is in pairing mode");
   
   // Calibrate joystick center (read a few samples)
   long x_sum = 0, y_sum = 0;
@@ -196,14 +253,18 @@ void loop() {
     motorCommand.motor2_direction = 0;
   }
   
-  // Button is placeholder (does nothing for now)
-  if (button_pressed) {
-    // Future: Add button functionality here
+  // Fire once on each button press. This works independently of ESP-NOW.
+  unsigned long currentTime = millis();
+  if (button_pressed && !previousButtonPressed &&
+      currentTime - lastShutterTime >= SHUTTER_DEBOUNCE_MS) {
+    lastShutterTime = currentTime;
+    fireSonyShutter();
   }
+  previousButtonPressed = button_pressed;
   
   // Send commands at regular intervals
-  unsigned long currentTime = millis();
-  if (currentTime - lastSendTime >= sendInterval) {
+  currentTime = millis();
+  if (espNowReady && currentTime - lastSendTime >= sendInterval) {
     lastSendTime = currentTime;
     
     // Send motor command
