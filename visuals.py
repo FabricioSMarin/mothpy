@@ -64,14 +64,15 @@ class ImagePlotWidget(QWidget):
         self.ROI1.addScaleHandle(pos=(0,1), center=(1,0))
         self.ROI1.addScaleHandle(pos=(1,0), center=(0,1))
         
-        # Second ROI
-        self.ROI2 = pg.ROI([50, 50], [10, 10], scaleSnap=True, aspectLocked=True, pen=roi_pen)
+        # Second ROI (registration / second-star follow)
+        roi2_pen = pg.mkPen((0, 204, 204), width=4)
+        self.ROI2 = pg.ROI([50, 50], [10, 10], scaleSnap=True, aspectLocked=True, pen=roi2_pen)
         self.ROI2.addScaleHandle(pos=(1, 1), center=(0,0))
         self.ROI2.addScaleHandle(pos=(0,0), center=(1,1))
         self.ROI2.addScaleHandle(pos=(0,1), center=(1,0))
         self.ROI2.addScaleHandle(pos=(1,0), center=(0,1))
         
-        # Create red crosshair for tracked star
+        # Create red crosshair for tracked star (ROI1)
         self.star_crosshair = pg.ScatterPlotItem(
             size=20, 
             pen=pg.mkPen('r', width=2), 
@@ -79,6 +80,15 @@ class ImagePlotWidget(QWidget):
             brush=None
         )
         self.star_crosshair.setVisible(False)  # Hidden by default
+
+        # Cyan crosshair for the second star (ROI2)
+        self.star2_crosshair = pg.ScatterPlotItem(
+            size=20,
+            pen=pg.mkPen((0, 220, 220), width=2),
+            symbol='+',
+            brush=None
+        )
+        self.star2_crosshair.setVisible(False)
         
         # Add image plot with CustomViewBox
         self.image_plot = self.graphics_layout.addPlot(viewBox=custom_vb, enableMouse=False)
@@ -86,7 +96,8 @@ class ImagePlotWidget(QWidget):
         self.image_plot.addItem(self.image_item)
         self.image_plot.addItem(self.ROI1)
         self.image_plot.addItem(self.ROI2)
-        self.image_plot.addItem(self.star_crosshair)  # Add crosshair overlay
+        self.image_plot.addItem(self.star_crosshair)
+        self.image_plot.addItem(self.star2_crosshair)
         self.image_plot.vb = custom_vb
 
         # Remove axis labels
@@ -136,7 +147,6 @@ class ImagePlotWidget(QWidget):
         
         self.setLayout(self.layout)
         self.setWindowTitle("PyQtGraph RGB Image Widget with Projections")
-        self.setGeometry(100, 100, 600, 800)
         
         # Update ROI images when moved or resized
         self.ROI1.sigRegionChanged.connect(self.update_roi_images)
@@ -171,6 +181,14 @@ class ImagePlotWidget(QWidget):
             self.star_crosshair.setVisible(True)
         else:
             self.star_crosshair.setVisible(False)
+
+    def update_star2_crosshair(self, x, y, visible=True):
+        """Update the cyan crosshair on the second (ROI2) star."""
+        if visible:
+            self.star2_crosshair.setData([x], [y])
+            self.star2_crosshair.setVisible(True)
+        else:
+            self.star2_crosshair.setVisible(False)
     
     def on_mouse_moved(self, pos):
         """Handle mouse movement over the image to show coordinates and pixel values"""

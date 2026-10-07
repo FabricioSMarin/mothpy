@@ -1,10 +1,17 @@
 from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFrame
+from PyQt5.QtCore import pyqtSignal
 import sys
 
 class MotorSettings(QWidget):
+    settingsChanged = pyqtSignal()
+
     def __init__(self, title, parent=None):
         super().__init__(parent)  # Pass parent reference
         self.title = title
+        self.res = None
+        self.velo = None
+        self.acc = None
+        self.bac = None
         self.initUI()
 
 
@@ -23,15 +30,20 @@ class MotorSettings(QWidget):
         
         # Define labels and line edits
         self.fields = {}
-        labels = ["Resolution", "Velocity", "Acceleration", "Backlash"]
+        labels = [
+            ("Resolution", "Resolution (steps/rev):"),
+            ("Velocity", "Velocity (steps/sec):"),
+            ("Acceleration", "Acceleration:"),
+            ("Backlash", "Backlash:"),
+        ]
         
-        for label in labels:
+        for key, display in labels:
             row_layout = QHBoxLayout()
-            lbl = QLabel(f"{label}:")
-            lbl.setFixedWidth(100)
+            lbl = QLabel(display)
+            lbl.setFixedWidth(160)
             line_edit = QLineEdit()
-            line_edit.setFixedWidth(150)
-            self.fields[label] = line_edit
+            line_edit.setFixedWidth(120)
+            self.fields[key] = line_edit
             row_layout.addWidget(lbl)
             row_layout.addWidget(line_edit)
             self.fields_layout.addLayout(row_layout)
@@ -74,6 +86,7 @@ class MotorSettings(QWidget):
             if res<=0: 
                 raise Exception()
             setattr(self, "res", res)
+            self.settingsChanged.emit()
         except:
             setattr(self, "res", None)
             print("Invalid resolution")
@@ -84,7 +97,8 @@ class MotorSettings(QWidget):
             velo = eval(self.fields["Velocity"].text())
             if velo<=0: 
                 raise Exception()
-            setattr(self, "velo", eval(self.fields["Velocity"].text()))
+            setattr(self, "velo", velo)
+            self.settingsChanged.emit()
         except:
             setattr(self, "velo", None)
             print("Invalid velocity")
@@ -95,7 +109,8 @@ class MotorSettings(QWidget):
             acc = eval(self.fields["Acceleration"].text())
             if acc<=0: 
                 raise Exception()
-            setattr(self, "acc", eval(self.fields["Acceleration"].text()))
+            setattr(self, "acc", acc)
+            self.settingsChanged.emit()
         except:
             setattr(self, "acc", None)
             print("Invalid acceleration")
@@ -106,7 +121,8 @@ class MotorSettings(QWidget):
             bac = eval(self.fields["Backlash"].text())
             if bac < 0: 
                 raise Exception()
-            setattr(self, "bac", eval(self.fields["Backlash"].text()))
+            setattr(self, "bac", bac)
+            self.settingsChanged.emit()
         except:
             setattr(self, "bac", None)
             print("Invalid backlash")
