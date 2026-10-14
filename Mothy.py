@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QSizePolicy, QLineEdit, QScrollArea, QFrame, QComboBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QSizePolicy, QLineEdit, QScrollArea, QFrame, QComboBox, QSplitter
 from PyQt5.QtCore import Qt, QSettings, pyqtSignal, QTimer, QThread, QObject, pyqtSlot
 from PyQt5 import QtCore
 import sys
@@ -22,12 +22,12 @@ from dpad import DPad
 from visuals import ImagePlotWidget
 
 
-def _grab_pyspin_frame(cam, params):
-    """Blocking PySpin grab/convert. Must run off the Qt GUI thread."""
+def _prepare_pyspin_acquisition(cam, params):
+    """Apply exposure/gain and start streaming. Must run off the Qt GUI thread."""
     is_continuous = bool(params.get("is_continuous", False))
+    verbose = bool(params.get("verbose", not is_continuous))
     exposure_time = float(params.get("exposure_time", 10000))
     gain = float(params.get("gain", 1.0))
-    display_mode = params.get("display_mode", "Color")
 
     nodemap = cam.GetNodeMap()
     try:
@@ -35,14 +35,14 @@ def _grab_pyspin_frame(cam, params):
             frame_rate_enable = PySpin.CBooleanPtr(nodemap.GetNode('AcquisitionFrameRateEnable'))
             if PySpin.IsAvailable(frame_rate_enable) and PySpin.IsWritable(frame_rate_enable):
                 frame_rate_enable.SetValue(False)
-                if not is_continuous:
+                if verbose:
                     print("Disabled frame rate control to allow long exposures")
         except Exception:
             try:
                 frame_rate_auto = PySpin.CEnumerationPtr(nodemap.GetNode('AcquisitionFrameRateAuto'))
                 if PySpin.IsAvailable(frame_rate_auto) and PySpin.IsWritable(frame_rate_auto):
                     frame_rate_auto.SetIntValue(frame_rate_auto.GetEntryByName('Off').GetValue())
-                    if not is_continuous:
+                    if verbose:
                         print("Set frame rate auto to Off")
             except Exception:
                 pass
@@ -51,7 +51,7 @@ def _grab_pyspin_frame(cam, params):
             trigger_mode = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerMode'))
             if PySpin.IsAvailable(trigger_mode) and PySpin.IsWritable(trigger_mode):
                 trigger_mode.SetIntValue(trigger_mode.GetEntryByName('Off').GetValue())
-                if not is_continuous:
+                if verbose:
                     print("Set trigger mode to Off")
         except Exception:
             pass
@@ -73,25 +73,25 @@ def _grab_pyspin_frame(cam, params):
             if exposure_time > exposure_max:
                 exposure_time = exposure_max
                 was_clamped = True
-                if not is_continuous:
+                if verbose:
                     print(f"WARNING: Requested exposure {requested_exposure} µs exceeds camera maximum!")
                     print(f"         Setting to maximum: {exposure_max} µs ({exposure_max/1000:.3f} ms)")
             elif exposure_time < exposure_min:
                 exposure_time = exposure_min
                 was_clamped = True
-                if not is_continuous:
+                if verbose:
                     print(f"WARNING: Requested exposure {requested_exposure} µs below camera minimum!")
                     print(f"         Setting to minimum: {exposure_min} µs")
 
             exposure_node.SetValue(exposure_time)
             actual_exposure = exposure_node.GetValue()
-            if not is_continuous and not was_clamped:
+            if verbose and not was_clamped:
                 print(f"Exposure set to: {actual_exposure} µs ({actual_exposure/1000:.3f} ms)")
                 print(f"Camera range: {exposure_min/1000:.1f} - {exposure_max/1000:.1f} ms")
-        elif not is_continuous:
+        elif verbose:
             print("Exposure time node not available/writable")
     except Exception as e:
-        if not is_continuous:
+        if verbose:
             print("Could not set exposure time:", e)
 
     try:
@@ -105,12 +105,12 @@ def _grab_pyspin_frame(cam, params):
             gain_max = gain_node.GetMax()
             gain = max(min(gain, gain_max), gain_min)
             gain_node.SetValue(gain)
-            if not is_continuous:
+            if verbose:
                 print(f"Set gain to {gain} dB")
-        elif not is_continuous:
+        elif verbose:
             print("Gain node not available/writable")
     except Exception as e:
-        if not is_continuous:
+        if verbose:
             print("Could not set gain:", e)
 
     try:
@@ -121,7 +121,7 @@ def _grab_pyspin_frame(cam, params):
             else:
                 acquisition_mode_node.SetIntValue(PySpin.AcquisitionMode_SingleFrame)
     except Exception as e:
-        if not is_continuous:
+        if verbose:
             print("Could not set acquisition mode:", e)
 
     if not is_continuous or not cam.IsStreaming():
@@ -135,22 +135,28 @@ def _grab_pyspin_frame(cam, params):
             time.sleep(0.3)
         cam.BeginAcquisition()
         time.sleep(0.1)
-        if not is_continuous:
+        if verbose:
             print("Acquisition started, waiting for image...")
 
-    image_processor = PySpin.ImageProcessor()
     if exposure_time > 1000000:
         timeout_ms = int(exposure_time / 1000 * 2) + 5000
     else:
         timeout_ms = max(3000, int(exposure_time / 1000) + 3000)
 
-    if not is_continuous and exposure_time >= 500000:
+    if verbose and exposure_time >= 500000:
         if exposure_time >= 1000000:
             print(f"Long exposure: {exposure_time/1000000:.1f} seconds. Please wait...")
             print(f"Using {timeout_ms/1000:.1f} second timeout")
         else:
             print(f"Long exposure: {exposure_time/1000:.0f} ms. Please wait...")
+    return timeout_ms
 
+
+def _retrieve_pyspin_frame(cam, params, timeout_ms):
+    """Blocking GetNextImage + convert. Must run off the Qt GUI thread."""
+    is_continuous = bool(params.get("is_continuous", False))
+    display_mode = params.get("display_mode", "Color")
+    image_processor = PySpin.ImageProcessor()
     image_result = cam.GetNextImage(timeout_ms)
     image_np = None
     try:
@@ -239,22 +245,39 @@ class CaptureWorker(QObject):
     finished = pyqtSignal()
 
     @pyqtSlot(object, dict)
-    def grab(self, cam, params):
+    def grab(self, cams, params):
+        cam_list = list(cams) if isinstance(cams, (list, tuple)) else [cams]
+        frames = [None] * len(cam_list)
         try:
-            image_np = _grab_pyspin_frame(cam, params)
-            if image_np is not None:
-                self.image_ready.emit(image_np)
+            timeouts = []
+            for i, cam in enumerate(cam_list):
+                if cam is None:
+                    timeouts.append(None)
+                    continue
+                cam_params = dict(params)
+                cam_params["verbose"] = (i == 0 and not params.get("is_continuous", False))
+                timeouts.append(_prepare_pyspin_acquisition(cam, cam_params))
+            for i, cam in enumerate(cam_list):
+                if cam is None:
+                    continue
+                try:
+                    frames[i] = _retrieve_pyspin_frame(cam, params, timeouts[i])
+                except Exception as cam_error:
+                    self.error.emit(f"Camera {i + 1} grab failed: {cam_error}")
+            self.image_ready.emit(frames)
         except Exception as e:
             self.error.emit(str(e))
-            try:
-                if cam is not None:
+            for cam in cam_list:
+                if cam is None:
+                    continue
+                try:
                     if cam.IsStreaming():
                         cam.EndAcquisition()
                     cam.DeInit()
                     time.sleep(0.5)
                     cam.Init()
-            except Exception as recovery_error:
-                self.error.emit(f"Error during recovery: {recovery_error}")
+                except Exception as recovery_error:
+                    self.error.emit(f"Error during recovery: {recovery_error}")
         finally:
             self.finished.emit()
 
@@ -335,6 +358,9 @@ class MainWindow(QMainWindow):
         self.calibration_frames = []  # Buffer for collecting calibration frames
         self.is_calibrating = False  # Flag for calibration mode
         self.dark_frame_path = "dark_frame.npy"  # Path to save/load dark frame
+        self.cam = None
+        self.cam2 = None
+        self.cameras = []
         
         self.initUI()
         self.loadSettings()
@@ -370,10 +396,13 @@ class MainWindow(QMainWindow):
         self.motor3 = MotorSettings("Focus", self)
         self.camera_controls = Controls()
         self.camera_controls.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        self.imgplot = ImagePlotWidget()
+        self.imgplot = ImagePlotWidget(title="Camera 1", show_rois=True)
+        self.imgplot2 = ImagePlotWidget(title="Camera 2", show_rois=False)
+        self.imgplot2.hide()
         
-        # Camera + ROI subviews expand to fill upper portion
+        # Camera live views expand to fill upper portion
         self.imgplot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.imgplot2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dpad.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         
         # ESP32 serial port row
@@ -420,8 +449,14 @@ class MainWindow(QMainWindow):
         controls_scroll.setMinimumHeight(280)
         controls_scroll.setFrameShape(QFrame.NoFrame)
 
-        # Portrait stack: camera/ROI views → controls (incl. color sliders) → console log
-        self.main_layout.addWidget(self.imgplot, stretch=3)
+        # Portrait stack: camera live views → controls (incl. color sliders) → console log
+        self.cam_splitter = QSplitter(Qt.Vertical)
+        self.cam_splitter.addWidget(self.imgplot)
+        self.cam_splitter.addWidget(self.imgplot2)
+        self.cam_splitter.setChildrenCollapsible(True)
+        self.cam_splitter.setStretchFactor(0, 1)
+        self.cam_splitter.setStretchFactor(1, 1)
+        self.main_layout.addWidget(self.cam_splitter, stretch=3)
         self.main_layout.addWidget(controls_scroll, stretch=2)
         self.main_layout.addWidget(self.logbox, stretch=0)
 
@@ -1103,17 +1138,26 @@ class MainWindow(QMainWindow):
         mean = self.tracking_stack / float(self.tracking_stack_count)
         return np.clip(mean, 0, 255).astype(np.uint8)
 
-    def _show_image_array(self, image_np):
-        self.imgplot.image_data = image_np
+    def _show_image_array(self, image_np, plot=None):
+        if image_np is None:
+            return
+        plot = plot or self.imgplot
+        plot.image_data = image_np
         if len(image_np.shape) == 3:
-            self.apply_color_correction()
+            self.apply_color_correction(plot)
         else:
-            self.imgplot.image_item.setImage(image_np)
-        self.imgplot.update_pixel_info()
-        if not hasattr(self, "rois_initialized"):
-            self.resize_rois(image_np)
-            self.rois_initialized = True
-        self.imgplot.update_roi_images()
+            plot.image_item.setImage(image_np)
+        plot.update_pixel_info()
+        if plot is self.imgplot:
+            if not hasattr(self, "rois_initialized"):
+                self.resize_rois(image_np)
+                self.rois_initialized = True
+
+    def _show_camera2_array(self, image_np):
+        if image_np is None:
+            return
+        image_np = np.rot90(image_np, k=-1)
+        self._show_image_array(image_np, plot=self.imgplot2)
 
     def _raw_tracking_frame(self):
         if self.latest_frame is not None:
@@ -1511,97 +1555,154 @@ class MainWindow(QMainWindow):
         self._display_tracking_result(frame, result)
         self._issue_tracking_motor_correction()
 
+    def _camera_list(self):
+        cams = []
+        if getattr(self, "cam", None) is not None:
+            cams.append(self.cam)
+        if getattr(self, "cam2", None) is not None:
+            cams.append(self.cam2)
+        return cams
+
+    def _camera_display_name(self, cam):
+        try:
+            nodemap = cam.GetTLDeviceNodeMap()
+            model = PySpin.CStringPtr(nodemap.GetNode("DeviceModelName"))
+            serial = PySpin.CStringPtr(nodemap.GetNode("DeviceSerialNumber"))
+            parts = []
+            if PySpin.IsReadable(model):
+                parts.append(model.GetValue())
+            if PySpin.IsReadable(serial):
+                parts.append(serial.GetValue())
+            return " ".join(parts) if parts else "FLIR"
+        except Exception:
+            return "FLIR"
+
+    def _configure_flir_camera(self, cam, label):
+        """Stream and exposure-friendly defaults used at connect time."""
+        try:
+            nodemap = cam.GetNodeMap()
+            s_nodemap = cam.GetTLStreamNodeMap()
+            try:
+                stream_buffer_count_mode = PySpin.CEnumerationPtr(s_nodemap.GetNode('StreamBufferCountMode'))
+                if PySpin.IsAvailable(stream_buffer_count_mode) and PySpin.IsWritable(stream_buffer_count_mode):
+                    stream_buffer_count_mode.SetIntValue(stream_buffer_count_mode.GetEntryByName('Manual').GetValue())
+                    print(f"{label}: stream buffer count mode set to Manual")
+
+                stream_buffer_count = PySpin.CIntegerPtr(s_nodemap.GetNode('StreamBufferCountManual'))
+                if PySpin.IsAvailable(stream_buffer_count) and PySpin.IsWritable(stream_buffer_count):
+                    stream_buffer_count.SetValue(10)
+                    print(f"{label}: stream buffer count set to 10")
+
+                stream_buffer_handling = PySpin.CEnumerationPtr(s_nodemap.GetNode('StreamBufferHandlingMode'))
+                if PySpin.IsAvailable(stream_buffer_handling) and PySpin.IsWritable(stream_buffer_handling):
+                    stream_buffer_handling.SetIntValue(stream_buffer_handling.GetEntryByName('NewestOnly').GetValue())
+                    print(f"{label}: stream buffer handling mode set to NewestOnly")
+            except Exception as stream_error:
+                print(f"{label}: could not configure stream settings: {stream_error}")
+
+            try:
+                frame_rate_enable = PySpin.CBooleanPtr(nodemap.GetNode('AcquisitionFrameRateEnable'))
+                if PySpin.IsAvailable(frame_rate_enable) and PySpin.IsWritable(frame_rate_enable):
+                    frame_rate_enable.SetValue(False)
+                    print(f"{label}: frame rate control disabled - long exposures enabled")
+            except Exception:
+                try:
+                    frame_rate_auto = PySpin.CEnumerationPtr(nodemap.GetNode('AcquisitionFrameRateAuto'))
+                    if PySpin.IsAvailable(frame_rate_auto) and PySpin.IsWritable(frame_rate_auto):
+                        frame_rate_auto.SetIntValue(frame_rate_auto.GetEntryByName('Off').GetValue())
+                        print(f"{label}: frame rate auto set to Off - long exposures enabled")
+                except Exception:
+                    print(f"{label}: could not disable frame rate control (may not be available)")
+
+            try:
+                frame_rate = PySpin.CFloatPtr(nodemap.GetNode('AcquisitionFrameRate'))
+                if PySpin.IsAvailable(frame_rate) and PySpin.IsWritable(frame_rate):
+                    frame_rate_min = frame_rate.GetMin()
+                    frame_rate.SetValue(frame_rate_min)
+                    print(f"{label}: frame rate set to minimum: {frame_rate_min} fps")
+            except Exception as fr_error:
+                print(f"{label}: could not set frame rate: {fr_error}")
+
+            try:
+                trigger_mode = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerMode'))
+                if PySpin.IsAvailable(trigger_mode) and PySpin.IsWritable(trigger_mode):
+                    trigger_mode.SetIntValue(trigger_mode.GetEntryByName('Off').GetValue())
+                    print(f"{label}: trigger mode disabled")
+            except Exception:
+                pass
+        except Exception as config_error:
+            print(f"{label}: could not fully configure camera: {config_error}")
+
+    def _update_camera2_visibility(self):
+        if getattr(self, "cam2", None) is not None:
+            self.imgplot2.show()
+            total = max(200, self.cam_splitter.height())
+            self.cam_splitter.setSizes([total // 2, total // 2])
+        else:
+            self.imgplot2.hide()
+            self.cam_splitter.setSizes([1, 0])
+
     def connect_camera(self):
         self._wait_for_grab_idle()
+        if getattr(self, "cam", None) is not None or getattr(self, "camList", None) is not None:
+            self.disconnec_camera()
         try:
-            # Initialize the PySpin system and connect to the first available camera.
             self.system = PySpin.System.GetInstance()
             self.camList = self.system.GetCameras()
-            if self.camList.GetSize() == 0:
+            n_cams = int(self.camList.GetSize())
+            if n_cams == 0:
                 print("No cameras detected!")
                 self.camera_controls.connect_status.setText("Disconnected")
                 self.camList.Clear()
                 self.system.ReleaseInstance()
-                return  # Exit early if no camera found
+                self.cam = None
+                self.cam2 = None
+                self.cameras = []
+                self._update_camera2_visibility()
+                return
 
-            # Camera found - initialize it
-            self.camera_controls.connect_status.setText("Connected")
-            self.cam = self.camList[0]
-            self.cam.Init()
-
-            # Configure camera for long exposures immediately after init
-            try:
-                nodemap = self.cam.GetNodeMap()
-                s_nodemap = self.cam.GetTLStreamNodeMap()
-
-                # Configure stream layer for long exposures
+            self.cameras = []
+            limit = min(n_cams, 2)
+            if n_cams > 2:
+                print(f"Detected {n_cams} cameras; live view uses the first two")
+            for i in range(limit):
+                cam = self.camList[i]
+                label = f"Camera {i + 1}"
                 try:
-                    # Set stream buffer count mode to manual
-                    stream_buffer_count_mode = PySpin.CEnumerationPtr(s_nodemap.GetNode('StreamBufferCountMode'))
-                    if PySpin.IsAvailable(stream_buffer_count_mode) and PySpin.IsWritable(stream_buffer_count_mode):
-                        stream_buffer_count_mode.SetIntValue(stream_buffer_count_mode.GetEntryByName('Manual').GetValue())
-                        print("Stream buffer count mode set to Manual")
+                    cam.Init()
+                    name = self._camera_display_name(cam)
+                    print(f"{label} connected: {name}")
+                    self._configure_flir_camera(cam, label)
+                    self.cameras.append(cam)
+                    if i == 0:
+                        self.imgplot.set_title(f"{label} — {name}")
+                    else:
+                        self.imgplot2.set_title(f"{label} — {name}")
+                except Exception as init_error:
+                    print(f"{label} failed to initialize: {init_error}")
 
-                    # Increase buffer count for long exposures
-                    stream_buffer_count = PySpin.CIntegerPtr(s_nodemap.GetNode('StreamBufferCountManual'))
-                    if PySpin.IsAvailable(stream_buffer_count) and PySpin.IsWritable(stream_buffer_count):
-                        stream_buffer_count.SetValue(10)
-                        print("Stream buffer count set to 10")
+            if not self.cameras:
+                raise RuntimeError("No cameras could be initialized")
 
-                    # Set buffer handling mode to NewestOnly to prevent memory issues
-                    stream_buffer_handling = PySpin.CEnumerationPtr(s_nodemap.GetNode('StreamBufferHandlingMode'))
-                    if PySpin.IsAvailable(stream_buffer_handling) and PySpin.IsWritable(stream_buffer_handling):
-                        stream_buffer_handling.SetIntValue(stream_buffer_handling.GetEntryByName('NewestOnly').GetValue())
-                        print("Stream buffer handling mode set to NewestOnly")
-                except Exception as stream_error:
-                    print(f"Warning: Could not configure stream settings: {stream_error}")
+            self.cam = self.cameras[0]
+            self.cam2 = self.cameras[1] if len(self.cameras) > 1 else None
+            self._update_camera2_visibility()
+            QTimer.singleShot(0, self._update_camera2_visibility)
 
-                # Disable frame rate control to allow long exposures
-                try:
-                    frame_rate_enable = PySpin.CBooleanPtr(nodemap.GetNode('AcquisitionFrameRateEnable'))
-                    if PySpin.IsAvailable(frame_rate_enable) and PySpin.IsWritable(frame_rate_enable):
-                        frame_rate_enable.SetValue(False)
-                        print("Frame rate control disabled - long exposures enabled")
-                except Exception:
-                    # Try alternative node name
-                    try:
-                        frame_rate_auto = PySpin.CEnumerationPtr(nodemap.GetNode('AcquisitionFrameRateAuto'))
-                        if PySpin.IsAvailable(frame_rate_auto) and PySpin.IsWritable(frame_rate_auto):
-                            frame_rate_auto.SetIntValue(frame_rate_auto.GetEntryByName('Off').GetValue())
-                            print("Frame rate auto set to Off - long exposures enabled")
-                    except Exception:
-                        print("Could not disable frame rate control (may not be available)")
-
-                # Set frame rate to very low value (0.1 fps = 10 second max exposure theoretically)
-                try:
-                    frame_rate = PySpin.CFloatPtr(nodemap.GetNode('AcquisitionFrameRate'))
-                    if PySpin.IsAvailable(frame_rate) and PySpin.IsWritable(frame_rate):
-                        frame_rate_min = frame_rate.GetMin()
-                        frame_rate.SetValue(frame_rate_min)
-                        print(f"Frame rate set to minimum: {frame_rate_min} fps")
-                except Exception as fr_error:
-                    print(f"Could not set frame rate: {fr_error}")
-
-                # Disable trigger mode
-                try:
-                    trigger_mode = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerMode'))
-                    if PySpin.IsAvailable(trigger_mode) and PySpin.IsWritable(trigger_mode):
-                        trigger_mode.SetIntValue(trigger_mode.GetEntryByName('Off').GetValue())
-                        print("Trigger mode disabled")
-                except Exception:
-                    pass
-
-            except Exception as config_error:
-                print(f"Warning: Could not fully configure camera: {config_error}")
-
-            # Enable hotspot calibration button
+            if self.cam2 is not None:
+                self.camera_controls.connect_status.setText("Connected (2 cameras)")
+            else:
+                self.camera_controls.connect_status.setText("Connected")
             self.camera_controls.rm_hotspots_button.setEnabled(True)
-
-            print("Camera connected and initialized")
+            print(f"{len(self.cameras)} camera(s) connected and initialized")
         except Exception as e:
             print(f"Error connecting camera: {e}")
             self.camera_controls.connect_status.setText("Disconnected")
             self.camera_controls.rm_hotspots_button.setEnabled(False)
+            self.cam = None
+            self.cam2 = None
+            self.cameras = []
+            self._update_camera2_visibility()
 
     def load_dark_frame(self):
         """Load dark frame from disk if available"""
@@ -1749,18 +1850,20 @@ class MainWindow(QMainWindow):
 
         # Do not EndAcquisition while GetNextImage is still blocking on the worker
         self._wait_for_grab_idle()
-        try:
-            if hasattr(self, "cam") and self.cam is not None and self.cam.IsStreaming():
-                self.cam.EndAcquisition()
-        except Exception:
-            pass
+        for cam in self._camera_list():
+            try:
+                if cam.IsStreaming():
+                    cam.EndAcquisition()
+            except Exception:
+                pass
         print("Stopped continuous capture mode")
 
     def capture_single_frame(self):
         """Queue a camera grab on the capture worker (does not block the GUI)."""
         if self.is_closing or self._grab_inflight:
             return
-        if not hasattr(self, "cam") or self.cam is None:
+        cams = self._camera_list()
+        if not cams:
             return
 
         try:
@@ -1780,7 +1883,7 @@ class MainWindow(QMainWindow):
             "display_mode": self.camera_controls.color_mode_combobox.currentText(),
         }
         self._grab_inflight = True
-        self._request_grab.emit(self.cam, params)
+        self._request_grab.emit(cams, params)
 
     def _on_capture_error(self, message):
         print(f"Error capturing image: {message}")
@@ -1803,19 +1906,25 @@ class MainWindow(QMainWindow):
         print(f"  Stack depth: {self.tracking_stack_count} frame(s)")
         self._show_image_array(self._stack_mean_uint8())
 
-    def _on_captured_frame(self, image_np):
-        """Dark-subtract and display a frame that arrived from the capture worker."""
-        if self.is_closing or image_np is None:
+    def _on_captured_frame(self, frames):
+        """Dark-subtract and display frames that arrived from the capture worker."""
+        if self.is_closing or frames is None:
+            return
+        if isinstance(frames, np.ndarray):
+            frames = [frames]
+        image_np = frames[0] if len(frames) > 0 else None
+        image2_np = frames[1] if len(frames) > 1 else None
+        if image_np is None and image2_np is None:
             return
 
-        if self.is_calibrating and len(self.calibration_frames) < 10:
+        if image_np is not None and self.is_calibrating and len(self.calibration_frames) < 10:
             self.calibration_frames.append(image_np.copy())
             print(f"Dark frame {len(self.calibration_frames)}/10 collected")
             if len(self.calibration_frames) == 10:
                 self.stop_continuous_capture()
                 self.finish_hotspot_calibration()
 
-        if self.hotspot_mask is not None and not self.is_calibrating:
+        if image_np is not None and self.hotspot_mask is not None and not self.is_calibrating:
             if len(image_np.shape) == 3 and len(self.hotspot_mask.shape) == 2:
                 image_np = image_np.astype(np.float32)
                 for i in range(image_np.shape[2]):
@@ -1826,7 +1935,10 @@ class MainWindow(QMainWindow):
             else:
                 print(f"Warning: Dark frame shape {self.hotspot_mask.shape} doesn't match image shape {image_np.shape}. Skipping subtraction.")
 
-        self.display_image(image_np)
+        if image_np is not None:
+            self.display_image(image_np)
+        if image2_np is not None:
+            self._show_camera2_array(image2_np)
 
     def update_color_correction(self):
         """Update color correction labels and apply to current image"""
@@ -1837,12 +1949,15 @@ class MainWindow(QMainWindow):
         
         # If we have an image, apply color correction
         if hasattr(self.imgplot, 'image_data') and self.imgplot.image_data is not None:
-            self.apply_color_correction()
+            self.apply_color_correction(self.imgplot)
+        if hasattr(self, "imgplot2") and self.imgplot2.image_data is not None:
+            self.apply_color_correction(self.imgplot2)
 
 
-    def apply_color_correction(self):
+    def apply_color_correction(self, plot=None):
         """Apply RGB gain correction to the current image for display."""
-        if self.imgplot.image_data is None or len(self.imgplot.image_data.shape) != 3:
+        plot = plot or self.imgplot
+        if plot.image_data is None or len(plot.image_data.shape) != 3:
             return  # Skip if image is not RGB
             
         # Get correction factors
@@ -1851,7 +1966,7 @@ class MainWindow(QMainWindow):
         b_factor = self.camera_controls.blue_slider.value() / 100.0
         
         # Work in float, keep original image_data untouched
-        corrected_image = self.imgplot.image_data.astype(np.float32, copy=True)
+        corrected_image = plot.image_data.astype(np.float32, copy=True)
         
         # image_data is RGB: channel 0=R, 1=G, 2=B
         corrected_image[:, :, 0] = np.clip(corrected_image[:, :, 0] * r_factor, 0, 255)
@@ -1859,10 +1974,10 @@ class MainWindow(QMainWindow):
         corrected_image[:, :, 2] = np.clip(corrected_image[:, :, 2] * b_factor, 0, 255)
         
         # Update the display
-        self.imgplot.image_item.setImage(corrected_image.astype(np.uint8))
+        plot.image_item.setImage(corrected_image.astype(np.uint8))
         
         # Update pixel info display if mouse is hovering
-        self.imgplot.update_pixel_info()
+        plot.update_pixel_info()
 
 
     def display_image(self, image_np):
@@ -1923,17 +2038,19 @@ class MainWindow(QMainWindow):
         # Order matters: camera -> camList -> system
         self._wait_for_grab_idle()
         try:
-            # Step 1: Stop streaming and deinitialize camera
-            if hasattr(self, 'cam') and self.cam is not None:
+            # Step 1: Stop streaming and deinitialize every camera
+            for i, cam in enumerate(self._camera_list()):
                 try:
-                    if self.cam.IsStreaming():
-                        self.cam.EndAcquisition()
-                    self.cam.DeInit()
+                    if cam.IsStreaming():
+                        cam.EndAcquisition()
+                    cam.DeInit()
                 except Exception as e:
-                    print(f"Error deinitializing camera: {e}")
-                # Delete the camera reference
-                del self.cam
-                self.cam = None
+                    print(f"Error deinitializing camera {i + 1}: {e}")
+            self.cam = None
+            self.cam2 = None
+            self.cameras = []
+            if hasattr(self, "imgplot2"):
+                self._update_camera2_visibility()
             
             # Step 2: Clear the camera list (releases camera references)
             if hasattr(self, 'camList') and self.camList is not None:

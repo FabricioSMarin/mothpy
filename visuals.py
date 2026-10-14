@@ -1,6 +1,6 @@
 import sys
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel
 import pyqtgraph as pg
 from PyQt5 import QtCore
 
@@ -21,16 +21,23 @@ class CustomViewBox(pg.ViewBox):
             self.autoRange()
 
 class ImagePlotWidget(QWidget):
-    def __init__(self):
+    def __init__(self, title="Camera 1", show_rois=True):
         super().__init__()
+        self.title = title
+        self.show_rois = show_rois
         self.last_mouse_pos = None  # Track last mouse position for live updates
+        self.ROI1 = None
+        self.ROI2 = None
         self.initUI()
+
+    def set_title(self, title):
+        self.title = title
+        if self.last_mouse_pos is None:
+            self.coord_label.setText(f"{self.title}: hover over image")
 
     def initUI(self):
         # Generate random RGB image
         self.image_data = np.random.rand(100, 100, 3)  # RGB image
-        stack = np.random.rand(10, 100, 100, 3)  # Example stack for normalization
-        xrange, yrange = self.image_data.shape[1], self.image_data.shape[0]
         
         # Create main layout
         self.layout = QVBoxLayout()
@@ -38,14 +45,9 @@ class ImagePlotWidget(QWidget):
         self.layout.setContentsMargins(0, 0, 0, 0)
         
         # Add coordinate display label at the top
-        self.coord_label = QLabel("Hover over image to see coordinates and pixel value")
+        self.coord_label = QLabel(f"{self.title}: hover over image")
         self.coord_label.setStyleSheet("background-color: #2b2b2b; color: #00ff00; padding: 5px; font-family: monospace;")
         self.layout.addWidget(self.coord_label)
-        
-        top_layout = QHBoxLayout()
-        top_layout.setSpacing(0)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.addLayout(top_layout)
         
         # Create GraphicsLayoutWidget
         self.graphics_layout = pg.GraphicsLayoutWidget()
@@ -54,51 +56,47 @@ class ImagePlotWidget(QWidget):
         # Custom ViewBox
         custom_vb = CustomViewBox()
         
-        # ROI properties
-        roi_pen = pg.mkPen((204, 204, 0), width=4)  # Dark yellow with thickness 4
-        
-        # First ROI
-        self.ROI1 = pg.ROI([10, 10], [10, 10], scaleSnap=True, aspectLocked=True, pen=roi_pen)
-        self.ROI1.addScaleHandle(pos=(1, 1), center=(0,0))
-        self.ROI1.addScaleHandle(pos=(0,0), center=(1,1))
-        self.ROI1.addScaleHandle(pos=(0,1), center=(1,0))
-        self.ROI1.addScaleHandle(pos=(1,0), center=(0,1))
-        
-        # Second ROI (registration / second-star follow)
-        roi2_pen = pg.mkPen((0, 204, 204), width=4)
-        self.ROI2 = pg.ROI([50, 50], [10, 10], scaleSnap=True, aspectLocked=True, pen=roi2_pen)
-        self.ROI2.addScaleHandle(pos=(1, 1), center=(0,0))
-        self.ROI2.addScaleHandle(pos=(0,0), center=(1,1))
-        self.ROI2.addScaleHandle(pos=(0,1), center=(1,0))
-        self.ROI2.addScaleHandle(pos=(1,0), center=(0,1))
-        
-        # Create red crosshair for tracked star (ROI1)
-        self.star_crosshair = pg.ScatterPlotItem(
-            size=20, 
-            pen=pg.mkPen('r', width=2), 
-            symbol='+',
-            brush=None
-        )
-        self.star_crosshair.setVisible(False)  # Hidden by default
-
-        # Cyan crosshair for the second star (ROI2)
-        self.star2_crosshair = pg.ScatterPlotItem(
-            size=20,
-            pen=pg.mkPen((0, 220, 220), width=2),
-            symbol='+',
-            brush=None
-        )
-        self.star2_crosshair.setVisible(False)
-        
         # Add image plot with CustomViewBox
         self.image_plot = self.graphics_layout.addPlot(viewBox=custom_vb, enableMouse=False)
         self.image_item = pg.ImageItem(self.image_data)
         self.image_plot.addItem(self.image_item)
-        self.image_plot.addItem(self.ROI1)
-        self.image_plot.addItem(self.ROI2)
-        self.image_plot.addItem(self.star_crosshair)
-        self.image_plot.addItem(self.star2_crosshair)
         self.image_plot.vb = custom_vb
+
+        if self.show_rois:
+            roi_pen = pg.mkPen((204, 204, 0), width=4)  # Dark yellow with thickness 4
+            self.ROI1 = pg.ROI([10, 10], [10, 10], scaleSnap=True, aspectLocked=True, pen=roi_pen)
+            self.ROI1.addScaleHandle(pos=(1, 1), center=(0,0))
+            self.ROI1.addScaleHandle(pos=(0,0), center=(1,1))
+            self.ROI1.addScaleHandle(pos=(0,1), center=(1,0))
+            self.ROI1.addScaleHandle(pos=(1,0), center=(0,1))
+
+            roi2_pen = pg.mkPen((0, 204, 204), width=4)
+            self.ROI2 = pg.ROI([50, 50], [10, 10], scaleSnap=True, aspectLocked=True, pen=roi2_pen)
+            self.ROI2.addScaleHandle(pos=(1, 1), center=(0,0))
+            self.ROI2.addScaleHandle(pos=(0,0), center=(1,1))
+            self.ROI2.addScaleHandle(pos=(0,1), center=(1,0))
+            self.ROI2.addScaleHandle(pos=(1,0), center=(0,1))
+
+            self.star_crosshair = pg.ScatterPlotItem(
+                size=20,
+                pen=pg.mkPen('r', width=2),
+                symbol='+',
+                brush=None
+            )
+            self.star_crosshair.setVisible(False)
+
+            self.star2_crosshair = pg.ScatterPlotItem(
+                size=20,
+                pen=pg.mkPen((0, 220, 220), width=2),
+                symbol='+',
+                brush=None
+            )
+            self.star2_crosshair.setVisible(False)
+
+            self.image_plot.addItem(self.ROI1)
+            self.image_plot.addItem(self.ROI2)
+            self.image_plot.addItem(self.star_crosshair)
+            self.image_plot.addItem(self.star2_crosshair)
 
         # Remove axis labels
         self.image_plot.hideAxis('bottom')
@@ -106,67 +104,16 @@ class ImagePlotWidget(QWidget):
         
         # Connect mouse move event to show coordinates and pixel values
         self.image_plot.scene().sigMouseMoved.connect(self.on_mouse_moved)
-        
-        # Add Histogram and Colorbar tool
-        self.histogram = pg.HistogramLUTItem()
-        self.histogram.setImageItem(self.image_item)
-        self.histogram.setFixedWidth(100)  # Set histogram width to 100
-        
-        # Set default colormap to greyclip for better star visibility
-        self.histogram.gradient.loadPreset('greyclip')
-        
-        # Create a container widget for the histogram and set fixed size policy
-        histogram_container = pg.GraphicsLayoutWidget()
-        histogram_container.setFixedWidth(100)
-        histogram_container.addItem(self.histogram)
-        
-        # Add widgets to layout with correct sizing
-        top_layout.addWidget(self.graphics_layout, 1)
-        top_layout.addWidget(histogram_container, 0)
-        
-        # Create bottom layout for extracted ROI images
-        bottom_layout = QHBoxLayout()
-        bottom_layout.setSpacing(0)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.addLayout(bottom_layout)
-        
-        # Create ImageItems for extracted ROI contents without histogram tools
-        self.roi1_image_view = pg.ImageView(view=pg.PlotItem())
-        self.roi2_image_view = pg.ImageView(view=pg.PlotItem())
-        
-        # Remove histogram, ROI, and menu buttons from the ImageView widgets
-        for roi_view in [self.roi1_image_view, self.roi2_image_view]:
-            roi_view.ui.histogram.hide()
-            roi_view.ui.roiBtn.hide()
-            roi_view.ui.menuBtn.hide()
-            roi_view.getView().hideAxis('bottom')
-            roi_view.getView().hideAxis('left')
-        
-        bottom_layout.addWidget(self.roi1_image_view, 1)
-        bottom_layout.addWidget(self.roi2_image_view, 1)
-        
+
+        self.layout.addWidget(self.graphics_layout)
         self.setLayout(self.layout)
         self.setWindowTitle("PyQtGraph RGB Image Widget with Projections")
-        
-        # Update ROI images when moved or resized
-        self.ROI1.sigRegionChanged.connect(self.update_roi_images)
-        self.ROI2.sigRegionChanged.connect(self.update_roi_images)
-        self.update_roi_images()
 
         return self.layout
     
     def update_roi_images(self):
-        roi1_bounds = self.ROI1.getArraySlice(self.image_data, self.image_item)[0]
-        roi2_bounds = self.ROI2.getArraySlice(self.image_data, self.image_item)[0]
-        
-        if roi1_bounds is not None:
-            roi1_data = self.image_data[roi1_bounds]
-            # Flip the ROI image vertically
-            self.roi1_image_view.setImage(np.fliplr(roi1_data))
-        if roi2_bounds is not None:
-            roi2_data = self.image_data[roi2_bounds]
-            # Flip the ROI image vertically
-            self.roi2_image_view.setImage(np.fliplr(roi2_data))
+        """Kept for callers; cropped ROI preview panes were removed."""
+        return
     
     def update_star_crosshair(self, x, y, visible=True):
         """Update the position of the red crosshair showing the tracked star
@@ -176,6 +123,8 @@ class ImagePlotWidget(QWidget):
             y: Y coordinate in image space
             visible: Whether to show the crosshair
         """
+        if getattr(self, "star_crosshair", None) is None:
+            return
         if visible:
             self.star_crosshair.setData([x], [y])
             self.star_crosshair.setVisible(True)
@@ -184,6 +133,8 @@ class ImagePlotWidget(QWidget):
 
     def update_star2_crosshair(self, x, y, visible=True):
         """Update the cyan crosshair on the second (ROI2) star."""
+        if getattr(self, "star2_crosshair", None) is None:
+            return
         if visible:
             self.star2_crosshair.setData([x], [y])
             self.star2_crosshair.setVisible(True)
@@ -240,7 +191,7 @@ class ImagePlotWidget(QWidget):
                         # Show the coordinates even if outside bounds
                         self.coord_label.setText(f"X={ix}, Y={iy}  |  Outside image bounds (size: {width}x{height})")
             else:
-                self.coord_label.setText("Hover over image to see coordinates and pixel value")
+                self.coord_label.setText(f"{self.title}: hover over image")
         except Exception as e:
             # Silently handle any errors to avoid crashing the UI
             pass
