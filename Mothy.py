@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QSizePolicy, QLineEdit, QScrollArea, QFrame, QComboBox, QSplitter
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QSizePolicy, QLineEdit, QScrollArea, QFrame, QComboBox, QSplitter, QTabWidget
 from PyQt5.QtCore import Qt, QSettings, pyqtSignal, QTimer, QThread, QObject, pyqtSlot
 from PyQt5 import QtCore
 import sys
@@ -11,6 +11,24 @@ import numpy as np
 import imageio
 from scipy.optimize import curve_fit
 from scipy.ndimage import shift as ndi_shift, gaussian_filter, affine_transform
+from scipy.signal import correlate2d
+
+# Suppress Teledyne DALSA CORMEM.SYS popup by clearing GenTL paths
+os.environ['GENICAM_GENTL64_PATH'] = ''
+os.environ['SPINNAKER_GENTL64_CTI'] = ''
+
+# Also try setting to Spinnaker-only path (adjust if your Spinnaker is installed elsewhere)
+spinnaker_gentl = r"C:\Program Files\FLIR Systems\Spinnaker\cti64\vs2015"
+if os.path.exists(spinnaker_gentl):
+    os.environ['GENICAM_GENTL64_PATH'] = spinnaker_gentl
+
+# On Windows, suppress error dialogs for missing drivers
+if sys.platform == 'win32':
+    import ctypes
+    # SEM_FAILCRITICALERRORS = 0x0001 - Suppress critical error dialog boxes
+    SEM_FAILCRITICALERRORS = 0x0001
+    ctypes.windll.kernel32.SetErrorMode(SEM_FAILCRITICALERRORS)
+
 import PySpin
 from PIL import Image  # Only used for resizing if needed
 import serial
@@ -237,6 +255,88 @@ def _align_frame_pixels(frame, cx, cy, angle_rad, offset_x, offset_y):
     return _shift_frame_to_lock(aligned, offset_x, offset_y)
 
 
+def _refine_alignment_cross_correlation(frame, reference, max_shift=10):
+    """
+    Refine alignment using phase/cross-correlation between frame and reference.
+    Returns refined (dx, dy) offset in pixels.
+    
+    Args:
+        frame: Frame to align (already roughly aligned)
+        reference: Reference image (current stack mean)
+        max_shift: Maximum pixels to search for refinement
+    
+    Returns:
+        (refined_dx, refined_dy): Sub-pixel shift to apply for best alignment
+    """
+    if reference is None or frame.shape != reference.shape:
+        return 0.0, 0.0
+    
+    # Convert to grayscale if needed
+    if len(frame.shape) == 3:
+        frame_gray = np.mean(frame, axis=2).astype(np.float32)
+    else:
+        frame_gray = frame.astype(np.float32)
+    
+    if len(reference.shape) == 3:
+        ref_gray = np.mean(reference, axis=2).astype(np.float32)
+    else:
+        ref_gray = reference.astype(np.float32)
+    
+    # Work on a central region to speed up computation
+    h, w = frame_gray.shape
+    crop_size = min(h, w, 512)  # Use central 512x512 region
+    y_start = (h - crop_size) // 2
+    x_start = (w - crop_size) // 2
+    
+    frame_crop = frame_gray[y_start:y_start+crop_size, x_start:x_start+crop_size]
+    ref_crop = ref_gray[y_start:y_start+crop_size, x_start:x_start+crop_size]
+    
+    # Normalize to reduce brightness variations
+    frame_crop = frame_crop - np.mean(frame_crop)
+    ref_crop = ref_crop - np.mean(ref_crop)
+    
+    # Compute cross-correlation (this is the compute-intensive part)
+    # Only search within max_shift radius
+    search_size = max_shift * 2 + 1
+    y_center = crop_size // 2
+    x_center = crop_size // 2
+    
+    frame_search = frame_crop[y_center-max_shift:y_center+max_shift+1,
+                              x_center-max_shift:x_center+max_shift+1]
+    ref_search = ref_crop[y_center-max_shift:y_center+max_shift+1,
+                          x_center-max_shift:x_center+max_shift+1]
+    
+    # Cross-correlation
+    corr = correlate2d(ref_search, frame_search, mode='same')
+    
+    # Find peak
+    peak_y, peak_x = np.unravel_index(np.argmax(corr), corr.shape)
+    
+    # Convert to offset (relative to center)
+    dy = peak_y - max_shift
+    dx = peak_x - max_shift
+    
+    # Sub-pixel refinement using parabolic fit around peak
+    if 0 < peak_y < search_size-1 and 0 < peak_x < search_size-1:
+        # Parabolic fit in Y
+        c1 = corr[peak_y-1, peak_x]
+        c2 = corr[peak_y, peak_x]
+        c3 = corr[peak_y+1, peak_x]
+        if c1 != c3:  # Avoid division by zero
+            dy_sub = 0.5 * (c1 - c3) / (c1 - 2*c2 + c3)
+            dy += dy_sub
+        
+        # Parabolic fit in X
+        c1 = corr[peak_y, peak_x-1]
+        c2 = corr[peak_y, peak_x]
+        c3 = corr[peak_y, peak_x+1]
+        if c1 != c3:
+            dx_sub = 0.5 * (c1 - c3) / (c1 - 2*c2 + c3)
+            dx += dx_sub
+    
+    return float(dx), float(dy)
+
+
 class CaptureWorker(QObject):
     """Runs blocking camera grabs and stack alignment off the Qt GUI thread."""
     image_ready = pyqtSignal(object)
@@ -284,19 +384,121 @@ class CaptureWorker(QObject):
     @pyqtSlot(object)
     def align_stack(self, job):
         try:
+            # Initial alignment using centroid-based transform
             aligned = _align_frame_pixels(
                 job["frame"], job["cx"], job["cy"], job["delta"],
                 job["offset_x"], job["offset_y"],
             )
+            
+            # Secondary refinement using cross-correlation if reference exists
+            reference = job.get("reference", None)
+            if reference is not None:
+                dx, dy = _refine_alignment_cross_correlation(aligned, reference, max_shift=10)
+                
+                # Apply refined shift if significant (> 0.1 pixels)
+                if abs(dx) > 0.1 or abs(dy) > 0.1:
+                    # Shift is in [x, y] coordinates, but ndi_shift needs [y, x] for 2D
+                    if aligned.ndim == 3:
+                        shift_vec = (-dy, -dx, 0.0)  # [y, x, channel]
+                    else:
+                        shift_vec = (-dy, -dx)  # [y, x]
+                    aligned = ndi_shift(aligned.astype(np.float32), shift=shift_vec, 
+                                       order=1, mode='constant', cval=0.0)
+                    
+                    # Print debug info directly (not an error)
+                    print(f"  Cross-corr refine: dx={dx:.2f}px, dy={dy:.2f}px")
+            
             self.aligned_ready.emit(aligned)
         except Exception as e:
             self.error.emit(f"Stack align error: {e}")
             self.aligned_ready.emit(None)
 
 
+class StackWorker(QObject):
+    """Computes expensive stacking operations (median, sigma-clip) in background."""
+    stack_ready = pyqtSignal(object)  # Emits the computed stack image
+    batch_median_ready = pyqtSignal(object)  # Emits the computed batch median (float64)
+    
+    @pyqtSlot(list, str)
+    def compute_stack(self, frames, mode):
+        """Compute stack using the specified mode.
+        
+        Args:
+            frames: List of aligned frames (uint8)
+            mode: "Mean", "Median", or "Sigma-clip"
+        """
+        try:
+            if not frames:
+                self.stack_ready.emit(None)
+                return
+            
+            if mode == "Median":
+                result = self._compute_median(frames)
+            elif mode == "Sigma-clip":
+                result = self._compute_sigma_clip(frames)
+            else:  # Mean
+                result = self._compute_mean(frames)
+            
+            self.stack_ready.emit(result)
+        except Exception as e:
+            print(f"Stack worker error: {e}")
+            self.stack_ready.emit(None)
+    
+    def _compute_mean(self, frames):
+        stack = np.array(frames, dtype=np.float32)
+        mean = np.mean(stack, axis=0)
+        return np.clip(mean, 0, 255).astype(np.uint8)
+    
+    def _compute_median(self, frames):
+        stack = np.array(frames, dtype=np.uint8)
+        median = np.median(stack, axis=0)
+        return median.astype(np.uint8)
+    
+    def _compute_sigma_clip(self, frames, sigma=3.0):
+        if len(frames) < 3:
+            return self._compute_mean(frames)
+        
+        stack = np.array(frames, dtype=np.float32)
+        mean = np.mean(stack, axis=0)
+        std = np.std(stack, axis=0)
+        
+        lower_bound = mean - sigma * std
+        upper_bound = mean + sigma * std
+        
+        mask = (stack >= lower_bound[np.newaxis, :, :]) & (stack <= upper_bound[np.newaxis, :, :])
+        masked_stack = np.where(mask, stack, np.nan)
+        
+        with np.errstate(invalid='ignore'):
+            result = np.nanmean(masked_stack, axis=0)
+        result = np.where(np.isnan(result), mean, result)
+        
+        return np.clip(result, 0, 255).astype(np.uint8)
+    
+    @pyqtSlot(list)
+    def compute_batch_median(self, frames):
+        """Compute median of a batch for Mean-of-Medians mode.
+        
+        Args:
+            frames: List of aligned frames (uint8) from current batch
+        """
+        try:
+            if not frames:
+                self.batch_median_ready.emit(None)
+                return
+            
+            stack = np.array(frames, dtype=np.uint8)
+            batch_median = np.median(stack, axis=0).astype(np.float64)
+            self.batch_median_ready.emit(batch_median)
+        except Exception as e:
+            print(f"Batch median worker error: {e}")
+            self.batch_median_ready.emit(None)
+
+
 class MainWindow(QMainWindow):
     _request_grab = pyqtSignal(object, dict)
     _request_align = pyqtSignal(object)
+    _request_stack = pyqtSignal(list, str)  # (frames, mode)
+    _request_batch_median = pyqtSignal(list)  # (frames)
 
     def __init__(self):
         super().__init__()
@@ -315,6 +517,7 @@ class MainWindow(QMainWindow):
         self.is_capturing = False
         self._grab_inflight = False
         self._init_capture_thread()
+        self._init_stack_thread()
         
         # Setup tracking timer
         self.tracking_timer = QTimer()
@@ -329,8 +532,30 @@ class MainWindow(QMainWindow):
         self.latest_frame = None  # last raw camera frame (after rotation)
         self.latest_frame_id = 0
         self.tracking_ingested_id = -1
-        self.tracking_stack = None  # float32 sum of aligned frames
-        self.tracking_stack_count = 0
+        
+        # Stacking system: Hybrid approach for different use cases
+        # RING BUFFER: For median/sigma-clip (keeps recent N frames)
+        self.tracking_stack_frames = []  # List of aligned frames (uint8) for stacking
+        self.tracking_stack_max_frames = 100  # Maximum frames to keep in buffer
+        
+        # ACCUMULATOR: For deep space mean stacking (unlimited, memory efficient)
+        self.tracking_accumulator = None  # float64 running sum (never discarded)
+        self.tracking_accumulator_count = 0  # Total frames accumulated
+        self.tracking_weight_map = None  # Tracks how many frames contributed to each pixel
+        
+        # BATCH MEDIAN MODE: Compute median every N frames, then mean those medians
+        self.tracking_batch_frames = []  # Current batch for median computation
+        self.tracking_batch_size = 100  # Frames per batch
+        self.tracking_median_accumulator = None  # Mean of batch medians
+        self.tracking_median_batch_count = 0  # Number of batches processed
+        
+        # Display update throttling
+        self.tracking_stack_display_counter = 0  # Counter for expensive stack updates
+        self.tracking_stack_display_interval = 100  # Update median/sigma every N frames
+        self.tracking_stack_cached_image = None  # Cached result of last expensive stack
+        self._stack_computation_pending = False  # Flag to prevent duplicate requests
+        self._batch_median_pending = False  # Flag to prevent duplicate batch median requests
+        
         self.tracking_debug_dir = None
         self.tracking_csv_path = None
         self.tracking_frame_index = 0
@@ -354,10 +579,13 @@ class MainWindow(QMainWindow):
         self.settings_send_timer.timeout.connect(self.send_motor_settings_to_esp32)
         
         # Hotspot calibration
-        self.hotspot_mask = None  # Will store the hot pixel values to subtract
-        self.calibration_frames = []  # Buffer for collecting calibration frames
+        self.hotspot_mask = None  # Will store the hot pixel values to subtract for camera 1
+        self.hotspot_mask2 = None  # Will store the hot pixel values to subtract for camera 2
+        self.calibration_frames = []  # Buffer for collecting calibration frames (camera 1)
+        self.calibration_frames2 = []  # Buffer for collecting calibration frames (camera 2)
         self.is_calibrating = False  # Flag for calibration mode
-        self.dark_frame_path = "dark_frame.npy"  # Path to save/load dark frame
+        self.dark_frame_path = "dark_frame_cam1.npy"  # Path to save/load dark frame for camera 1
+        self.dark_frame_path2 = "dark_frame_cam2.npy"  # Path to save/load dark frame for camera 2
         self.cam = None
         self.cam2 = None
         self.cameras = []
@@ -396,8 +624,19 @@ class MainWindow(QMainWindow):
         self.motor3 = MotorSettings("Focus", self)
         self.camera_controls = Controls()
         self.camera_controls.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        self.imgplot = ImagePlotWidget(title="Camera 1", show_rois=True)
+        
+        # Camera 1: Live and Stacked views in tabs
+        self.imgplot = ImagePlotWidget(title="Camera 1 - Live", show_rois=True)
+        self.imgplot_stacked = ImagePlotWidget(title="Camera 1 - Stacked", show_rois=False)
+        
+        self.cam1_tabs = QTabWidget()
+        self.cam1_tabs.addTab(self.imgplot, "Live")
+        self.cam1_tabs.addTab(self.imgplot_stacked, "Stacked")
+        
+        # Camera 2: Single view (no stacking)
         self.imgplot2 = ImagePlotWidget(title="Camera 2", show_rois=False)
+        
+        # Initially hide camera panes until cameras are connected
         self.imgplot2.hide()
         
         # Camera live views expand to fill upper portion
@@ -438,38 +677,55 @@ class MainWindow(QMainWindow):
 
         controls_widget = QWidget()
         controls_widget.setLayout(controls_layout)
-        controls_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        controls_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
         controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         controls_scroll.setWidget(controls_widget)
-        controls_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        controls_scroll.setMinimumHeight(280)
+        controls_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        controls_scroll.setMinimumWidth(350)
+        controls_scroll.setMaximumWidth(450)
         controls_scroll.setFrameShape(QFrame.NoFrame)
 
-        # Portrait stack: camera live views → controls (incl. color sliders) → console log
+        # Landscape layout: Left side (cameras + log) | Right side (controls)
+        # Left side: vertical layout with cameras above and log below
         self.cam_splitter = QSplitter(Qt.Vertical)
-        self.cam_splitter.addWidget(self.imgplot)
+        self.cam_splitter.addWidget(self.cam1_tabs)
         self.cam_splitter.addWidget(self.imgplot2)
         self.cam_splitter.setChildrenCollapsible(True)
         self.cam_splitter.setStretchFactor(0, 1)
         self.cam_splitter.setStretchFactor(1, 1)
-        self.main_layout.addWidget(self.cam_splitter, stretch=3)
-        self.main_layout.addWidget(controls_scroll, stretch=2)
-        self.main_layout.addWidget(self.logbox, stretch=0)
+        
+        left_layout = QVBoxLayout()
+        left_layout.setSpacing(4)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(self.cam_splitter, stretch=4)
+        left_layout.addWidget(self.logbox, stretch=1)
+        
+        left_widget = QWidget()
+        left_widget.setLayout(left_layout)
+        
+        # Main horizontal splitter: cameras/log on left, controls on right
+        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.addWidget(left_widget)
+        main_splitter.addWidget(controls_scroll)
+        main_splitter.setStretchFactor(0, 3)  # Left side gets more space
+        main_splitter.setStretchFactor(1, 1)  # Right side (controls) is narrower
+        
+        self.main_layout.addWidget(main_splitter)
 
         central_widget.setLayout(self.main_layout)
         self.setCentralWidget(central_widget)
         self.setWindowTitle("Mothpy")
 
-        # Prefer a tall portrait window within available screen space
+        # Prefer a wide landscape window within available screen space
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
-            width = min(900, available.width())
-            height = min(1200, available.height())
+            width = min(1600, available.width())
+            height = min(900, available.height())
             self.resize(width, height)
             self.move(
                 available.x() + (available.width() - width) // 2,
@@ -483,6 +739,8 @@ class MainWindow(QMainWindow):
         self.dpad.near_button.clicked.connect(self.near_clicked)
         self.dpad.far_button.clicked.connect(self.far_clicked)
         self.dpad.track_button.clicked.connect(self.track_clicked)
+        self.dpad.stack_mode_combo.currentIndexChanged.connect(self.on_stack_mode_changed)
+        self.cam1_tabs.currentChanged.connect(self.on_cam1_tab_changed)
         self.camera_controls.connect_camera.clicked.connect(self.connect_camera)
         self.camera_controls.rm_hotspots_button.clicked.connect(self.calibrate_hotspots)
         self.camera_controls.capture_button.clicked.connect(self.capture_image)
@@ -507,6 +765,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.update_dpad_angle_labels)
         QTimer.singleShot(0, self.refresh_serial_ports)
         QTimer.singleShot(500, self.auto_connect_esp32_serial)
+        
+        # Set initial camera visibility (no cameras connected yet)
+        QTimer.singleShot(0, self._update_camera2_visibility)
 
     def _init_capture_thread(self):
         self.capture_thread = QThread(self)
@@ -519,6 +780,16 @@ class MainWindow(QMainWindow):
         self.capture_worker.error.connect(self._on_capture_error, Qt.QueuedConnection)
         self.capture_worker.finished.connect(self._on_grab_finished, Qt.QueuedConnection)
         self.capture_thread.start()
+    
+    def _init_stack_thread(self):
+        self.stack_thread = QThread(self)
+        self.stack_worker = StackWorker()
+        self.stack_worker.moveToThread(self.stack_thread)
+        self._request_stack.connect(self.stack_worker.compute_stack, Qt.QueuedConnection)
+        self._request_batch_median.connect(self.stack_worker.compute_batch_median, Qt.QueuedConnection)
+        self.stack_worker.stack_ready.connect(self._on_stack_ready, Qt.QueuedConnection)
+        self.stack_worker.batch_median_ready.connect(self._on_batch_median_ready, Qt.QueuedConnection)
+        self.stack_thread.start()
 
     def _grab_timeout_s(self):
         try:
@@ -608,10 +879,24 @@ class MainWindow(QMainWindow):
         """)
 
     def onUpdateText(self, text):
+        # Check if user has scrolled away from bottom BEFORE making changes
+        scrollbar = self.logbox.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 10  # Within 10px of bottom
+        
+        # Save current scroll position in case user is reading
+        saved_scroll_position = scrollbar.value()
+        
+        # Move cursor to end and insert new text
         cursor = self.logbox.textCursor()
+        cursor.movePosition(cursor.End)
         cursor.insertText(text)
-        self.logbox.setTextCursor(cursor)
-        self.logbox.ensureCursorVisible()
+        
+        # Only auto-scroll if user was already at the bottom
+        # Otherwise, restore their scroll position so they can keep reading
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(saved_scroll_position)
 
     def keyPressEvent(self, event):
         """Handle arrow key presses for motor control and bracket keys for step adjustment"""
@@ -698,18 +983,21 @@ class MainWindow(QMainWindow):
         self.settings.setValue("m1_velo", self.motor1.fields["Velocity"].text())
         self.settings.setValue("m1_acc", self.motor1.fields["Acceleration"].text())
         self.settings.setValue("m1_back", self.motor1.fields["Backlash"].text())
+        self.settings.setValue("m1_invert", self.motor1.invert_checkbox.isChecked())
 
         self.settings.setValue("m2_visibility", self.motor2.toggle_button.isChecked())
         self.settings.setValue("m2_res", self.motor2.fields["Resolution"].text())
         self.settings.setValue("m2_velo", self.motor2.fields["Velocity"].text())
         self.settings.setValue("m2_acc", self.motor2.fields["Acceleration"].text())
         self.settings.setValue("m2_back", self.motor2.fields["Backlash"].text())
+        self.settings.setValue("m2_invert", self.motor2.invert_checkbox.isChecked())
 
         self.settings.setValue("m3_visibility", self.motor3.toggle_button.isChecked())
         self.settings.setValue("m3_res", self.motor3.fields["Resolution"].text())
         self.settings.setValue("m3_velo", self.motor3.fields["Velocity"].text())
         self.settings.setValue("m3_acc", self.motor3.fields["Acceleration"].text())
         self.settings.setValue("m3_back", self.motor3.fields["Backlash"].text())
+        self.settings.setValue("m3_invert", self.motor3.invert_checkbox.isChecked())
 
         self.settings.setValue("exposure", self.camera_controls.exposure_edit.text())
         self.settings.setValue("gain", self.camera_controls.gain_edit.text())
@@ -737,6 +1025,8 @@ class MainWindow(QMainWindow):
             self.motor1.fields["Velocity"].setText(self.settings.value("m1_velo", ""))
             self.motor1.fields["Acceleration"].setText(self.settings.value("m1_acc", ""))
             self.motor1.fields["Backlash"].setText(self.settings.value("m1_back", ""))
+            invert_val = self.settings.value("m1_invert", False)
+            self.motor1.invert_checkbox.setChecked(invert_val if isinstance(invert_val, bool) else invert_val.lower() == "true")
 
             val = self.settings.value("m2_visibility", True)
             self.motor2.toggle_button.setChecked(val.lower()=="true" if isinstance(val,str) else val)
@@ -744,6 +1034,8 @@ class MainWindow(QMainWindow):
             self.motor2.fields["Velocity"].setText(self.settings.value("m2_velo", ""))
             self.motor2.fields["Acceleration"].setText(self.settings.value("m2_acc", ""))
             self.motor2.fields["Backlash"].setText(self.settings.value("m2_back", ""))
+            invert_val = self.settings.value("m2_invert", False)
+            self.motor2.invert_checkbox.setChecked(invert_val if isinstance(invert_val, bool) else invert_val.lower() == "true")
 
             val = self.settings.value("m3_visibility", True)
             self.motor3.toggle_button.setChecked(val.lower()=="true" if isinstance(val,str) else val)
@@ -751,6 +1043,8 @@ class MainWindow(QMainWindow):
             self.motor3.fields["Velocity"].setText(self.settings.value("m3_velo", ""))
             self.motor3.fields["Acceleration"].setText(self.settings.value("m3_acc", ""))
             self.motor3.fields["Backlash"].setText(self.settings.value("m3_back", ""))
+            invert_val = self.settings.value("m3_invert", False)
+            self.motor3.invert_checkbox.setChecked(invert_val if isinstance(invert_val, bool) else invert_val.lower() == "true")
 
             self.camera_controls.exposure_edit.setText(self.settings.value("exposure", ""))
             self.camera_controls.gain_edit.setText(self.settings.value("gain", ""))
@@ -979,45 +1273,57 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             print(f"Moving {name}: {steps_text} steps")
 
+    def _get_direction(self, motor, direction):
+        """Get the actual direction to send to ESP32, accounting for inversion"""
+        if motor.inverted:
+            return 'B' if direction == 'F' else 'F'
+        return direction
+
     def up_clicked(self):
         """Move Motor 1 (Alt) up"""
         steps = self.dpad.ud_lineedit.text()
-        command = f"move:1,F,{steps}"
+        direction = self._get_direction(self.motor1, 'F')
+        command = f"move:1,{direction},{steps}"
         self.send_esp32_command(command)
         self._log_move("Alt up", steps, self.motor1)
 
     def down_clicked(self):
         """Move Motor 1 (Alt) down"""
         steps = self.dpad.ud_lineedit.text()
-        command = f"move:1,B,{steps}"
+        direction = self._get_direction(self.motor1, 'B')
+        command = f"move:1,{direction},{steps}"
         self.send_esp32_command(command)
         self._log_move("Alt down", steps, self.motor1)
 
     def left_clicked(self):
         """Move Motor 2 (Azi) left"""
         steps = self.dpad.lr_lineedit.text()
-        command = f"move:2,B,{steps}"
+        direction = self._get_direction(self.motor2, 'B')
+        command = f"move:2,{direction},{steps}"
         self.send_esp32_command(command)
         self._log_move("Azi left", steps, self.motor2)
 
     def right_clicked(self):
         """Move Motor 2 (Azi) right"""
         steps = self.dpad.lr_lineedit.text()
-        command = f"move:2,F,{steps}"
+        direction = self._get_direction(self.motor2, 'F')
+        command = f"move:2,{direction},{steps}"
         self.send_esp32_command(command)
         self._log_move("Azi right", steps, self.motor2)
 
     def near_clicked(self):
         """Move Motor 3 (Focus) near"""
         steps = self.dpad.nf_lineedit.text()
-        command = f"move:3,F,{steps}"
+        direction = self._get_direction(self.motor3, 'F')
+        command = f"move:3,{direction},{steps}"
         self.send_esp32_command(command)
         self._log_move("Focus near", steps, self.motor3)
 
     def far_clicked(self):
         """Move Motor 3 (Focus) far"""
         steps = self.dpad.nf_lineedit.text()
-        command = f"move:3,B,{steps}"
+        direction = self._get_direction(self.motor3, 'B')
+        command = f"move:3,{direction},{steps}"
         self.send_esp32_command(command)
         self._log_move("Focus far", steps, self.motor3)
 
@@ -1036,9 +1342,24 @@ class MainWindow(QMainWindow):
             print(f"Max L/R steps (d-pad): {self.dpad.lr_lineedit.text()}")
             stacking = "ON" if self._stacking_enabled() else "OFF"
             print(f"Image stacking: {stacking}")
-            print("Corrections move the locked star toward the ROI center.")
+            if self._stacking_enabled():
+                mode = self.dpad.stack_mode_combo.currentText()
+                deep_space = self.dpad.deep_space_checkbox.isChecked()
+                print(f"  Mode: {mode}")
+                if deep_space:
+                    print(f"  Deep Space: ENABLED (unlimited accumulation)")
+                else:
+                    print(f"  Deep Space: DISABLED (ring buffer, last {self.tracking_stack_max_frames} frames)")
+            print("")
+            print("PHASE 1: Analyzing trajectory (first 5 frames)")
+            print("  - No motor corrections during analysis")
+            print("  - Measuring star drift rate")
+            print("")
+            print("PHASE 2: Active tracking (after analysis)")
+            print("  - Motor corrections will center the star in ROI")
+            print("  - Drift compensation applied")
+            print("")
             print("Right (cyan) ROI follows a second star for registration logging.")
-            print("Monitoring left ROI for bright spot...")
             print("=" * 60)
 
             if not self.is_capturing:
@@ -1073,11 +1394,50 @@ class MainWindow(QMainWindow):
     def _stacking_enabled(self):
         return bool(self.dpad.stack_checkbox.isChecked())
 
+    def _analyze_trajectory(self):
+        """Analyze the first 5 frames to calculate drift rate (pixels per second)"""
+        if len(self.tracking_trajectory_buffer) < 2:
+            self.tracking_drift_x = 0.0
+            self.tracking_drift_y = 0.0
+            return
+        
+        # Calculate drift using linear regression over time
+        times = np.array([t for t, x, y in self.tracking_trajectory_buffer])
+        x_positions = np.array([x for t, x, y in self.tracking_trajectory_buffer])
+        y_positions = np.array([y for t, x, y in self.tracking_trajectory_buffer])
+        
+        # Normalize time to seconds from first frame
+        times = times - times[0]
+        
+        # Linear fit: position = drift_rate * time + offset
+        if len(times) > 1 and times[-1] > 0:
+            # Calculate drift rate (slope of linear fit)
+            x_drift = (x_positions[-1] - x_positions[0]) / times[-1] if times[-1] > 0 else 0.0
+            y_drift = (y_positions[-1] - y_positions[0]) / times[-1] if times[-1] > 0 else 0.0
+            
+            self.tracking_drift_x = x_drift
+            self.tracking_drift_y = y_drift
+            
+            print(f"  Analysis period: {times[-1]:.1f} seconds")
+            print(f"  Total drift: X={x_positions[-1] - x_positions[0]:.1f}px, Y={y_positions[-1] - y_positions[0]:.1f}px")
+        else:
+            self.tracking_drift_x = 0.0
+            self.tracking_drift_y = 0.0
+    
     def _reset_tracking_session(self):
         self.tracking_ref_x = None
         self.tracking_ref_y = None
-        self.tracking_stack = None
-        self.tracking_stack_count = 0
+        self.tracking_stack_frames = []
+        self.tracking_accumulator = None
+        self.tracking_accumulator_count = 0
+        self.tracking_weight_map = None
+        self.tracking_batch_frames = []
+        self.tracking_median_accumulator = None
+        self.tracking_median_batch_count = 0
+        self.tracking_stack_cached_image = None
+        self.tracking_stack_display_counter = 0
+        self._stack_computation_pending = False
+        self._batch_median_pending = False
         self.tracking_ingested_id = -1
         self.tracking_frame_index = 0
         self.last_track_offset_x = None
@@ -1089,6 +1449,13 @@ class MainWindow(QMainWindow):
         self.tracking_motor_frame_id = -1
         self.tracking_ref_angle = None
         self.last_stack_angle_deg = 0.0
+        
+        # Trajectory analysis for first 5 frames
+        self.tracking_trajectory_buffer = []  # Store (timestamp, x, y) tuples
+        self.tracking_drift_x = 0.0  # pixels per second drift in X
+        self.tracking_drift_y = 0.0  # pixels per second drift in Y
+        self.tracking_analysis_complete = False
+        
         if self.latest_frame is None and getattr(self.imgplot, "image_data", None) is not None:
             self.latest_frame = np.array(self.imgplot.image_data, copy=True)
         self._start_tracking_debug_session()
@@ -1099,8 +1466,16 @@ class MainWindow(QMainWindow):
         self._save_final_tracking_stack()
         self.tracking_ref_x = None
         self.tracking_ref_y = None
-        self.tracking_stack = None
-        self.tracking_stack_count = 0
+        self.tracking_stack_frames = []
+        self.tracking_accumulator = None
+        self.tracking_accumulator_count = 0
+        self.tracking_weight_map = None
+        self.tracking_batch_frames = []
+        self.tracking_median_accumulator = None
+        self.tracking_median_batch_count = 0
+        self.tracking_stack_cached_image = None
+        self._stack_computation_pending = False
+        self._batch_median_pending = False
         self.last_track_offset_x = None
         self.last_track_offset_y = None
         self.imgplot.update_star_crosshair(0, 0, visible=False)
@@ -1122,21 +1497,199 @@ class MainWindow(QMainWindow):
         print(f"Tracking debug folder: {self.tracking_debug_dir}")
 
     def _save_final_tracking_stack(self):
-        stacked = self._stack_mean_uint8()
-        if stacked is None or not self.tracking_debug_dir:
+        if not self.tracking_debug_dir:
             return
-        path = os.path.join(self.tracking_debug_dir, "stack_mean.png")
+        if not self.tracking_stack_frames and self.tracking_accumulator is None and self.tracking_median_accumulator is None:
+            return
+        
+        mode = self.dpad.stack_mode_combo.currentText()
+        
+        # For final save, compute directly (not async) to ensure we save the actual result
+        if mode == "Mean":
+            stacked = self._stack_mean_uint8()
+        elif mode == "Median":
+            stacked = self._stack_median_uint8()
+        elif mode == "Sigma-clip":
+            stacked = self._stack_sigma_clip_uint8()
+        elif mode == "Mean-of-Medians":
+            stacked = self._stack_mean_of_medians_uint8()
+        else:
+            stacked = self._stack_mean_uint8()
+        
+        if stacked is None:
+            return
+        
+        path = os.path.join(self.tracking_debug_dir, f"stack_{mode.lower().replace('-', '_')}.png")
+        
+        # Determine frame count for save message
+        if mode == "Mean-of-Medians" and self.tracking_median_batch_count > 0:
+            total_frames = self.tracking_median_batch_count * self.tracking_batch_size + len(self.tracking_batch_frames)
+            count_msg = f"{self.tracking_median_batch_count} batches ({total_frames} total frames)"
+        elif mode == "Mean" and self.dpad.deep_space_checkbox.isChecked() and self.tracking_accumulator_count > 0:
+            frame_count = self.tracking_accumulator_count
+            count_msg = f"{frame_count} total frames"
+        else:
+            frame_count = len(self.tracking_stack_frames)
+            count_msg = f"{frame_count} frames (ring buffer)"
+        
         try:
             imageio.imwrite(path, stacked)
-            print(f"Saved stacked image ({self.tracking_stack_count} frames): {path}")
+            print(f"Saved stacked image ({count_msg}, {mode}): {path}")
         except Exception as e:
             print(f"Could not save stacked image: {e}")
 
-    def _stack_mean_uint8(self):
-        if self.tracking_stack is None or self.tracking_stack_count <= 0:
+    def _get_stacked_image(self, force_compute=False):
+        """Get stacked image using the selected mode.
+        
+        For expensive modes (median, sigma-clip), only recompute every Nth frame
+        to avoid GUI freezing. Use cached result in between.
+        """
+        if not self.tracking_stack_frames and self.tracking_median_accumulator is None:
             return None
-        mean = self.tracking_stack / float(self.tracking_stack_count)
+        
+        mode = self.dpad.stack_mode_combo.currentText()
+        
+        # Mean and Mean-of-Medians are fast, always compute on main thread
+        if mode == "Mean":
+            return self._stack_mean_uint8()
+        elif mode == "Mean-of-Medians":
+            return self._stack_mean_of_medians_uint8()
+        
+        # For expensive modes, use background worker with caching
+        self.tracking_stack_display_counter += 1
+        should_update = (
+            force_compute or 
+            self.tracking_stack_cached_image is None or
+            self.tracking_stack_display_counter >= self.tracking_stack_display_interval
+        )
+        
+        if should_update and not self._stack_computation_pending:
+            self.tracking_stack_display_counter = 0
+            self._stack_computation_pending = True
+            # Send copy of frame list to worker thread
+            frames_copy = [f.copy() for f in self.tracking_stack_frames]
+            self._request_stack.emit(frames_copy, mode)
+            # Will be updated via _on_stack_ready callback
+        
+        # Return cached result or fallback to mean
+        return self.tracking_stack_cached_image if self.tracking_stack_cached_image is not None else self._stack_mean_uint8()
+    
+    def _on_stack_ready(self, stacked_image):
+        """Called when background stack computation completes."""
+        self._stack_computation_pending = False
+        if stacked_image is not None:
+            self.tracking_stack_cached_image = stacked_image
+            mode = self.dpad.stack_mode_combo.currentText()
+            print(f"  [{mode}] Updated stack display ({len(self.tracking_stack_frames)} frames)")
+            # Refresh the stacked view ONLY if that tab is visible (saves bandwidth on remote desktop)
+            if self.is_tracking and self._stacking_enabled() and self.cam1_tabs.currentIndex() == 1:
+                self._show_image_array(stacked_image, plot=self.imgplot_stacked)
+    
+    def _on_batch_median_ready(self, batch_median):
+        """Called when background batch median computation completes."""
+        self._batch_median_pending = False
+        if batch_median is not None:
+            # Add to median accumulator
+            if self.tracking_median_accumulator is None:
+                self.tracking_median_accumulator = batch_median
+                self.tracking_median_batch_count = 1
+            else:
+                self.tracking_median_accumulator += batch_median
+                self.tracking_median_batch_count += 1
+            
+            print(f"  Batch {self.tracking_median_batch_count} completed: median accumulated")
+            print(f"  Total: {self.tracking_median_batch_count * self.tracking_batch_size} frames processed")
+            
+            # Update stacked view if visible
+            if self.cam1_tabs.currentIndex() == 1:
+                stacked = self._get_stacked_image()
+                if stacked is not None:
+                    self._show_image_array(stacked, plot=self.imgplot_stacked)
+
+    def _stack_mean_uint8(self):
+        """Compute mean of all frames with proper weighting for rotated frames.
+        
+        Uses accumulator + weight map if deep space mode is enabled (unlimited frames),
+        otherwise uses ring buffer (last 100 frames).
+        """
+        # Deep space mode: use accumulator with weight map (all frames)
+        if self.dpad.deep_space_checkbox.isChecked() and self.tracking_accumulator is not None:
+            if self.tracking_accumulator_count <= 0:
+                return None
+            
+            # Use weight map if available (handles rotation edge effects)
+            if self.tracking_weight_map is not None:
+                # Avoid divide by zero - set minimum weight to 1
+                safe_weights = np.maximum(self.tracking_weight_map, 1.0)
+                mean = self.tracking_accumulator / safe_weights
+            else:
+                # Fallback to uniform weighting
+                mean = self.tracking_accumulator / float(self.tracking_accumulator_count)
+            
+            return np.clip(mean, 0, 255).astype(np.uint8)
+        
+        # Regular mode: use ring buffer (recent frames only)
+        if not self.tracking_stack_frames:
+            return None
+        stack = np.array(self.tracking_stack_frames, dtype=np.float32)
+        mean = np.mean(stack, axis=0)
         return np.clip(mean, 0, 255).astype(np.uint8)
+    
+    def _stack_mean_of_medians_uint8(self):
+        """Compute mean of batch medians (best for deep space with outlier rejection)."""
+        if self.tracking_median_accumulator is None or self.tracking_median_batch_count <= 0:
+            return None
+        mean_of_medians = self.tracking_median_accumulator / float(self.tracking_median_batch_count)
+        return np.clip(mean_of_medians, 0, 255).astype(np.uint8)
+    
+    def _stack_median_uint8(self):
+        """Compute median of all frames in buffer."""
+        if not self.tracking_stack_frames:
+            return None
+        stack = np.array(self.tracking_stack_frames, dtype=np.uint8)
+        median = np.median(stack, axis=0)
+        return median.astype(np.uint8)
+    
+    def _stack_sigma_clip_uint8(self, sigma=3.0):
+        """Compute mean after sigma-clipping outliers."""
+        if not self.tracking_stack_frames:
+            return None
+        if len(self.tracking_stack_frames) < 3:
+            # Not enough frames for meaningful sigma clipping
+            return self._stack_mean_uint8()
+        
+        stack = np.array(self.tracking_stack_frames, dtype=np.float32)
+        mean = np.mean(stack, axis=0)
+        std = np.std(stack, axis=0)
+        
+        # Mask outliers beyond sigma threshold
+        lower_bound = mean - sigma * std
+        upper_bound = mean + sigma * std
+        
+        # Create mask for each frame
+        mask = (stack >= lower_bound[np.newaxis, :, :]) & (stack <= upper_bound[np.newaxis, :, :])
+        
+        # Compute masked mean (use mean value where all pixels rejected)
+        masked_stack = np.where(mask, stack, np.nan)
+        with np.errstate(invalid='ignore'):
+            result = np.nanmean(masked_stack, axis=0)
+        result = np.where(np.isnan(result), mean, result)
+        
+        return np.clip(result, 0, 255).astype(np.uint8)
+    
+    def _get_total_frame_count(self):
+        """Get total frame count based on current stacking mode."""
+        mode = self.dpad.stack_mode_combo.currentText()
+        
+        if mode == "Mean-of-Medians":
+            # Count completed batches + frames in current batch
+            return self.tracking_median_batch_count * self.tracking_batch_size + len(self.tracking_batch_frames)
+        elif mode == "Mean" and self.dpad.deep_space_checkbox.isChecked():
+            # Deep space mean uses accumulator count
+            return self.tracking_accumulator_count
+        else:
+            # Other modes use ring buffer
+            return len(self.tracking_stack_frames)
 
     def _show_image_array(self, image_np, plot=None):
         if image_np is None:
@@ -1148,6 +1701,7 @@ class MainWindow(QMainWindow):
         else:
             plot.image_item.setImage(image_np)
         plot.update_pixel_info()
+        plot.update_projections()  # Update the projection plots
         if plot is self.imgplot:
             if not hasattr(self, "rois_initialized"):
                 self.resize_rois(image_np)
@@ -1256,7 +1810,8 @@ class MainWindow(QMainWindow):
         self.imgplot.ROI2.setPos([new_x, new_y])
         self.imgplot.ROI2.blockSignals(False)
         self.imgplot.update_roi_images()
-        self.imgplot.update_star2_crosshair(star["star_x_img"], star["star_y_img"], visible=True)
+        # Crosshair disabled for cleaner view
+        # self.imgplot.update_star2_crosshair(star["star_x_img"], star["star_y_img"], visible=True)
 
         center_x = new_x + width / 2.0
         center_y = new_y + height / 2.0
@@ -1354,7 +1909,9 @@ class MainWindow(QMainWindow):
             "roi_y": int(star["roi_y"]),
             "roi_width": int(star["roi_width"]),
             "roi_height": int(star["roi_height"]),
-            "stack_count": int(self.tracking_stack_count),
+            "stack_buffer_count": len(self.tracking_stack_frames),
+            "stack_total_count": self._get_total_frame_count(),
+            "stack_median_batches": self.tracking_median_batch_count if self.dpad.stack_mode_combo.currentText() == "Mean-of-Medians" else 0,
             "stacking_enabled": self._stacking_enabled(),
             "steps_x": int(self.last_steps_x),
             "steps_y": int(self.last_steps_y),
@@ -1409,20 +1966,43 @@ class MainWindow(QMainWindow):
             return None
         if self.tracking_ingested_id == self.latest_frame_id:
             if self._stacking_enabled():
-                return self._stack_mean_uint8()
+                return self._get_stacked_image()
             return frame
 
         try:
             star = self._extract_star_in_roi(frame)
             if star is None:
                 if self._stacking_enabled():
-                    return self._stack_mean_uint8()
+                    return self._get_stacked_image()
                 return None
 
             is_lock = self.tracking_ref_x is None or self.tracking_ref_y is None
             if is_lock:
                 self.tracking_ref_x = star["star_x_img"]
                 self.tracking_ref_y = star["star_y_img"]
+                print(f"  Crosshair lock: X={self.tracking_ref_x:.1f}, Y={self.tracking_ref_y:.1f}")
+
+            # Collect trajectory data for first 5 frames
+            if not self.tracking_analysis_complete:
+                timestamp = time.time()
+                self.tracking_trajectory_buffer.append((timestamp, star["star_x_img"], star["star_y_img"]))
+                
+                if len(self.tracking_trajectory_buffer) >= 5:
+                    self._analyze_trajectory()
+                    self.tracking_analysis_complete = True
+                    print("=" * 60)
+                    print("TRAJECTORY ANALYSIS COMPLETE")
+                    print(f"Drift rate: X={self.tracking_drift_x:.3f} px/s, Y={self.tracking_drift_y:.3f} px/s")
+                    print("Beginning active tracking corrections...")
+                    print("=" * 60)
+                else:
+                    print(f"\n{'='*50}")
+                    print(f"TRAJECTORY ANALYSIS: Frame {len(self.tracking_trajectory_buffer)}/5")
+                    print(f"  Star position: ({star['star_x_img']:.1f}, {star['star_y_img']:.1f})")
+                    # Crosshair disabled for cleaner view
+                    # self.imgplot.update_star_crosshair(star["star_x_img"], star["star_y_img"], visible=True)
+                    self.tracking_ingested_id = self.latest_frame_id
+                    return frame  # Don't process further during analysis phase
 
             # Drive the locked star toward the geometric center of the ROI.
             center_x = star["roi_width"] / 2.0
@@ -1432,8 +2012,6 @@ class MainWindow(QMainWindow):
 
             print(f"\n{'='*50}")
             print("TRACKING UPDATE")
-            if is_lock:
-                print(f"  Crosshair lock: X={self.tracking_ref_x:.1f}, Y={self.tracking_ref_y:.1f}")
             print(f"  ROI center: ({center_x:.1f}, {center_y:.1f})")
             print(f"  Offset from ROI center: X={offset_x:.1f}px, Y={offset_y:.1f}px")
 
@@ -1455,6 +2033,10 @@ class MainWindow(QMainWindow):
                 if abs(delta) >= 1e-6:
                     print(f"  Rotated {self.last_stack_angle_deg:.3f} deg around ROI1 star "
                           f"({star['star_x_img']:.1f}, {star['star_y_img']:.1f})")
+                
+                # Get current stack mean as reference for cross-correlation refinement
+                reference = self._get_stacked_image() if len(self.tracking_stack_frames) > 0 else None
+                
                 self._request_align.emit({
                     "frame": np.array(frame, copy=True),
                     "cx": float(star["star_x_img"]),
@@ -1462,28 +2044,32 @@ class MainWindow(QMainWindow):
                     "delta": float(delta),
                     "offset_x": float(offset_x),
                     "offset_y": float(offset_y),
+                    "reference": reference,  # Pass stack mean for cross-correlation refinement
                 })
 
             self.tracking_ingested_id = self.latest_frame_id
             self._save_tracking_debug(star, offset_x, offset_y, is_lock, roi2=roi2)
             self.tracking_frame_index += 1
 
-            # Crosshair follows the live star; stacked view is aligned to ROI center
-            self.imgplot.update_star_crosshair(star["star_x_img"], star["star_y_img"], visible=True)
+            # Crosshair disabled for cleaner view
+            # self.imgplot.update_star_crosshair(star["star_x_img"], star["star_y_img"], visible=True)
             if self._stacking_enabled():
-                return self._stack_mean_uint8()
+                return self._get_stacked_image()
             return frame
         except Exception as e:
             print(f"Tracking error: {e}")
             if self._stacking_enabled():
-                return self._stack_mean_uint8()
+                return self._get_stacked_image()
             return None
 
     def _compute_tracking_steps(self, offset_x, offset_y, roi_width, roi_height):
         """Map pixel error from the ROI center into motor steps.
 
-        U/D and L/R on the d-pad are the max steps per tracking update.
-        Full scale is reached at 25 px off center.
+        Scaling calibration (measured):
+        - Vertical (altitude): 26 steps to traverse full ROI height
+        - Horizontal (azimuth): 900 steps to traverse full ROI width
+        
+        This computes proportional correction steps based on pixel offset.
         """
         try:
             max_ud_steps = int(float(self.dpad.ud_lineedit.text()))
@@ -1495,56 +2081,113 @@ class MainWindow(QMainWindow):
         if roi_width < 2 or roi_height < 2 or max_ud_steps < 1 or max_lr_steps < 1:
             return 0, 0
 
-        def axis_steps(offset_px, max_steps, roi_half):
-            if abs(offset_px) <= self.tracking_pixel_deadband:
-                return 0
-            span = max(8.0, min(float(roi_half), 25.0))
-            steps = int(round(offset_px / span * max_steps))
-            if steps == 0:
-                steps = 1 if offset_px > 0 else -1
-            return max(min(steps, max_steps), -max_steps)
+        # Calibrated scaling: steps needed to traverse full ROI
+        VERTICAL_STEPS_PER_ROI = 26.0
+        HORIZONTAL_STEPS_PER_ROI = 900.0
 
-        steps_x = axis_steps(offset_x, max_lr_steps, roi_width / 2.0)
-        steps_y = axis_steps(offset_y, max_ud_steps, roi_height / 2.0)
+        # Calculate steps per pixel
+        steps_per_px_y = VERTICAL_STEPS_PER_ROI / roi_height
+        steps_per_px_x = HORIZONTAL_STEPS_PER_ROI / roi_width
+
+        # Apply deadband (ignore small jitter)
+        if abs(offset_x) <= self.tracking_pixel_deadband:
+            steps_x = 0
+        else:
+            steps_x = int(round(offset_x * steps_per_px_x))
+            # Clamp to max steps
+            steps_x = max(min(steps_x, max_lr_steps), -max_lr_steps)
+            # Ensure at least 1 step if offset exceeds deadband
+            if steps_x == 0:
+                steps_x = 1 if offset_x > 0 else -1
+
+        if abs(offset_y) <= self.tracking_pixel_deadband:
+            steps_y = 0
+        else:
+            steps_y = int(round(offset_y * steps_per_px_y))
+            # Clamp to max steps
+            steps_y = max(min(steps_y, max_ud_steps), -max_ud_steps)
+            # Ensure at least 1 step if offset exceeds deadband
+            if steps_y == 0:
+                steps_y = 1 if offset_y > 0 else -1
+
         return steps_x, steps_y
 
     def _issue_tracking_motor_correction(self):
+        """Issue motor corrections to center the star, accounting for drift"""
         if self.last_track_offset_x is None:
             return
         if self.tracking_motor_frame_id == self.tracking_ingested_id:
             return
+        
+        # Don't issue corrections during trajectory analysis phase
+        if not self.tracking_analysis_complete:
+            print(f"  Analyzing trajectory... no motor corrections yet")
+            return
+        
         self.tracking_motor_frame_id = self.tracking_ingested_id
 
         steps_x = int(self.last_steps_x)
         steps_y = int(self.last_steps_y)
 
-        # Match d-pad polarity to slide the star toward ROI center:
-        # star right of center → azimuth RIGHT (F); star above center → altitude UP (F).
+        # DEBUG: Print the logic so we can verify it
+        print(f"\n  DEBUG TRACKING CORRECTION:")
+        print(f"    Offset X: {self.last_track_offset_x:.1f}px (+ = star RIGHT of center)")
+        print(f"    Offset Y: {self.last_track_offset_y:.1f}px (+ = star TOP/ABOVE center)")
+        print(f"    Steps  X: {steps_x} (sign matches offset)")
+        print(f"    Steps  Y: {steps_y} (sign matches offset)")
+        
+        # Tracking correction logic (does NOT use invert checkboxes):
+        # Based on manual D-pad observations:
+        # - DOWN button sends move:1,B,10 → moves star DOWN
+        # - RIGHT button sends move:2,B,10 → moves star RIGHT
+        # Therefore:
+        #   Motor 1: 'B' = DOWN, 'F' = UP
+        #   Motor 2: 'B' = RIGHT, 'F' = LEFT
+        #
+        # To center the star, move it opposite to its offset:
+        # - Star at TOP (positive offset_y) → need to move DOWN → send 'B'
+        # - Star at BOTTOM (negative offset_y) → need to move UP → send 'F'
+        # - Star at RIGHT (positive offset_x) → need to move LEFT → send 'F'
+        # - Star at LEFT (negative offset_x) → need to move RIGHT → send 'B'
+        
         if steps_y != 0:
-            direction_ud = "F" if steps_y > 0 else "B"
-            move_name = "UP" if steps_y > 0 else "DOWN"
+            direction_ud = "B" if steps_y > 0 else "F"  # B=DOWN, F=UP
+            move_name = "DOWN" if direction_ud == "B" else "UP"
+            print(f"    Y Correction: Send '{direction_ud}' to Motor 1 → moves star {move_name}")
             command = f"move:1,{direction_ud},{abs(steps_y)}"
-            print(f"  Altitude correction: {abs(steps_y)} steps {move_name} "
-                  f"({self.last_track_offset_y:.1f}px from center)")
+            print(f"  Altitude correction: {abs(steps_y)} steps {move_name}")
             self.send_esp32_command(command)
         else:
-            print(f"  Altitude: on ROI center ({self.last_track_offset_y:.1f}px)")
+            print(f"  Altitude: on ROI center")
 
         if steps_x != 0:
-            direction_lr = "F" if steps_x > 0 else "B"
-            move_name = "RIGHT" if steps_x > 0 else "LEFT"
+            # FIX: Flip the logic - negative offset needs B (RIGHT), positive needs F (LEFT)
+            direction_lr = "B" if steps_x < 0 else "F"  # B=RIGHT (for negative/LEFT offset), F=LEFT (for positive/RIGHT offset)
+            move_name = "RIGHT" if direction_lr == "B" else "LEFT"
+            print(f"    X Correction: Send '{direction_lr}' to Motor 2 → moves star {move_name}")
             command = f"move:2,{direction_lr},{abs(steps_x)}"
-            print(f"  Azimuth correction: {abs(steps_x)} steps {move_name} "
-                  f"({self.last_track_offset_x:.1f}px from center)")
+            print(f"  Azimuth correction: {abs(steps_x)} steps {move_name}")
             self.send_esp32_command(command)
         else:
-            print(f"  Azimuth: on ROI center ({self.last_track_offset_x:.1f}px)")
+            print(f"  Azimuth: on ROI center")
 
     def _display_tracking_result(self, frame, result):
-        if self._stacking_enabled() and result is not None:
-            self._show_image_array(result)
-        elif frame is not None:
-            self._show_image_array(frame)
+        """Update only the currently visible tab to reduce remote desktop bandwidth.
+        
+        Live view (tab 0) shows the raw camera frame.
+        Stacked view (tab 1) shows the accumulated stack result.
+        """
+        # Only update the currently visible tab to save bandwidth/performance
+        current_tab = self.cam1_tabs.currentIndex()
+        
+        if current_tab == 0:
+            # Live tab is visible - update with raw frame
+            if frame is not None:
+                self._show_image_array(frame, plot=self.imgplot)
+        else:
+            # Stacked tab is visible - update with stack result
+            if self._stacking_enabled() and result is not None:
+                self._show_image_array(result, plot=self.imgplot_stacked)
 
     def perform_tracking_update(self):
         """Centroid the latest raw frame and issue correction commands."""
@@ -1634,13 +2277,28 @@ class MainWindow(QMainWindow):
             print(f"{label}: could not fully configure camera: {config_error}")
 
     def _update_camera2_visibility(self):
-        if getattr(self, "cam2", None) is not None:
+        """Update visibility of camera panes based on number of connected cameras."""
+        num_cameras = len([c for c in [getattr(self, "cam", None), getattr(self, "cam2", None)] if c is not None])
+        
+        if num_cameras == 0:
+            # No cameras: hide all camera stuff, show only motor controls
+            self.cam_splitter.hide()
+            self.camera_controls.hide()
+        elif num_cameras == 1:
+            # One camera: show only first camera pane (with tabs)
+            self.cam_splitter.show()
+            self.camera_controls.show()
+            self.cam1_tabs.show()
+            self.imgplot2.hide()
+            self.cam_splitter.setSizes([1, 0])
+        else:
+            # Two cameras: show both panes
+            self.cam_splitter.show()
+            self.camera_controls.show()
+            self.cam1_tabs.show()
             self.imgplot2.show()
             total = max(200, self.cam_splitter.height())
             self.cam_splitter.setSizes([total // 2, total // 2])
-        else:
-            self.imgplot2.hide()
-            self.cam_splitter.setSizes([1, 0])
 
     def connect_camera(self):
         self._wait_for_grab_idle()
@@ -1705,45 +2363,79 @@ class MainWindow(QMainWindow):
             self._update_camera2_visibility()
 
     def load_dark_frame(self):
-        """Load dark frame from disk if available"""
+        """Load dark frames from disk if available"""
+        # Load dark frame for camera 1
         try:
             if os.path.exists(self.dark_frame_path):
                 self.hotspot_mask = np.load(self.dark_frame_path)
                 print("=" * 60)
-                print("DARK FRAME LOADED FROM DISK")
+                print("CAMERA 1 DARK FRAME LOADED")
                 print(f"File: {self.dark_frame_path}")
                 mean_value = np.mean(self.hotspot_mask)
                 max_value = np.max(self.hotspot_mask)
                 print(f"Dark frame stats: Mean={mean_value:.1f}, Max={max_value:.1f}")
-                print("Dark frame will be subtracted from all images")
+                print("Dark frame will be subtracted from Camera 1 images")
                 print("=" * 60)
             else:
-                print(f"No saved dark frame found at {self.dark_frame_path}")
+                print(f"No saved Camera 1 dark frame found at {self.dark_frame_path}")
         except Exception as e:
-            print(f"Error loading dark frame: {e}")
+            print(f"Error loading Camera 1 dark frame: {e}")
             self.hotspot_mask = None
+        
+        # Load dark frame for camera 2
+        try:
+            if os.path.exists(self.dark_frame_path2):
+                self.hotspot_mask2 = np.load(self.dark_frame_path2)
+                print("=" * 60)
+                print("CAMERA 2 DARK FRAME LOADED")
+                print(f"File: {self.dark_frame_path2}")
+                mean_value = np.mean(self.hotspot_mask2)
+                max_value = np.max(self.hotspot_mask2)
+                print(f"Dark frame stats: Mean={mean_value:.1f}, Max={max_value:.1f}")
+                print("Dark frame will be subtracted from Camera 2 images")
+                print("=" * 60)
+            else:
+                print(f"No saved Camera 2 dark frame found at {self.dark_frame_path2}")
+        except Exception as e:
+            print(f"Error loading Camera 2 dark frame: {e}")
+            self.hotspot_mask2 = None
     
     def save_dark_frame(self):
-        """Save dark frame to disk"""
+        """Save dark frames to disk"""
         try:
             if self.hotspot_mask is not None:
                 np.save(self.dark_frame_path, self.hotspot_mask)
-                print(f"Dark frame saved to {self.dark_frame_path}")
+                print(f"Camera 1 dark frame saved to {self.dark_frame_path}")
         except Exception as e:
-            print(f"Error saving dark frame: {e}")
+            print(f"Error saving Camera 1 dark frame: {e}")
+        
+        try:
+            if self.hotspot_mask2 is not None:
+                np.save(self.dark_frame_path2, self.hotspot_mask2)
+                print(f"Camera 2 dark frame saved to {self.dark_frame_path2}")
+        except Exception as e:
+            print(f"Error saving Camera 2 dark frame: {e}")
     
     def calibrate_hotspots(self):
         """Start dark frame calibration using 10 frames (lens cap on)"""
+        num_cameras = len(self._camera_list())
+        if num_cameras == 0:
+            print("ERROR: No cameras connected. Connect cameras before calibrating.")
+            return
+        
         print("=" * 60)
         print("DARK FRAME CALIBRATION STARTED")
-        print("*** PUT LENS CAP ON NOW ***")
+        print(f"Calibrating {num_cameras} camera(s)")
+        print("*** PUT LENS CAP(S) ON NOW ***")
         print("Collecting 10 frames to create dark frame...")
         print("=" * 60)
         
         # Reset calibration data
         self.calibration_frames = []
+        self.calibration_frames2 = []
         self.is_calibrating = True
         self.hotspot_mask = None
+        self.hotspot_mask2 = None
         
         # Set button text to show calibration is in progress
         self.camera_controls.rm_hotspots_button.setText("Calibrating...")
@@ -1760,39 +2452,48 @@ class MainWindow(QMainWindow):
     
     def finish_hotspot_calibration(self):
         """Process collected frames to create dark frame (average of all frames)"""
-        if len(self.calibration_frames) < 10:
-            print(f"Error: Only collected {len(self.calibration_frames)} frames")
+        cam1_ready = len(self.calibration_frames) >= 10
+        cam2_ready = len(self.calibration_frames2) >= 10
+        
+        if not cam1_ready and not cam2_ready:
+            print(f"Error: Not enough frames collected (Cam1: {len(self.calibration_frames)}, Cam2: {len(self.calibration_frames2)})")
             self.is_calibrating = False
             self.camera_controls.rm_hotspots_button.setText("Dark Frame")
             self.camera_controls.rm_hotspots_button.setEnabled(True)
             return
         
-        print("Creating dark frame from collected images...")
+        print("Creating dark frame(s) from collected images...")
         
-        # Convert frames to numpy array and calculate mean
-        # This creates a dark frame by averaging all the lens-cap-on images
-        frames = np.array(self.calibration_frames)  # Shape: (10, height, width, [channels])
+        # Process Camera 1 dark frame
+        if cam1_ready:
+            frames = np.array(self.calibration_frames)  # Shape: (10, height, width, [channels])
+            self.hotspot_mask = np.mean(frames, axis=0).astype(np.float32)
+            mean_value = np.mean(self.hotspot_mask)
+            max_value = np.max(self.hotspot_mask)
+            print(f"Camera 1: Dark frame created from {len(self.calibration_frames)} frames")
+            print(f"  Stats: Mean={mean_value:.1f}, Max={max_value:.1f}")
         
-        # Calculate average across all frames - this is our dark frame
-        self.hotspot_mask = np.mean(frames, axis=0).astype(np.float32)
-        
-        # Calculate some statistics for user feedback
-        mean_value = np.mean(self.hotspot_mask)
-        max_value = np.max(self.hotspot_mask)
+        # Process Camera 2 dark frame
+        if cam2_ready:
+            frames2 = np.array(self.calibration_frames2)
+            self.hotspot_mask2 = np.mean(frames2, axis=0).astype(np.float32)
+            mean_value2 = np.mean(self.hotspot_mask2)
+            max_value2 = np.max(self.hotspot_mask2)
+            print(f"Camera 2: Dark frame created from {len(self.calibration_frames2)} frames")
+            print(f"  Stats: Mean={mean_value2:.1f}, Max={max_value2:.1f}")
         
         print("=" * 60)
         print(f"DARK FRAME CALIBRATION COMPLETE")
-        print(f"Created dark frame from {len(self.calibration_frames)} frames")
-        print(f"Dark frame stats: Mean={mean_value:.1f}, Max={max_value:.1f}")
-        print(f"Dark frame will be subtracted from all subsequent images")
-        print("*** YOU CAN REMOVE THE LENS CAP NOW ***")
+        print(f"Dark frame(s) will be subtracted from all subsequent images")
+        print("*** YOU CAN REMOVE THE LENS CAP(S) NOW ***")
         print("=" * 60)
         
-        # Save dark frame to disk
+        # Save dark frames to disk
         self.save_dark_frame()
         
         # Clean up
         self.calibration_frames = []
+        self.calibration_frames2 = []
         self.is_calibrating = False
         self.camera_controls.rm_hotspots_button.setText("Dark Frame")
         self.camera_controls.rm_hotspots_button.setEnabled(True)
@@ -1808,6 +2509,31 @@ class MainWindow(QMainWindow):
             self.camera_controls.capture_button.setText("Capture")
         else:
             self.camera_controls.capture_button.setText("Start")
+    
+    def on_stack_mode_changed(self):
+        """Handle stack mode change - refresh display with new stacking method"""
+        if self.is_tracking and self._stacking_enabled() and self.tracking_stack_frames:
+            # Reset cache and force recomputation for new mode
+            self.tracking_stack_cached_image = None
+            self.tracking_stack_display_counter = 0
+            self._stack_computation_pending = False  # Reset pending flag for new mode
+            # Trigger recomputation with new mode
+            self._get_stacked_image(force_compute=True)
+            mode = self.dpad.stack_mode_combo.currentText()
+            print(f"Stack display mode changed to: {mode}")
+    
+    def on_cam1_tab_changed(self, index):
+        """Handle Camera 1 tab change - refresh the newly visible view"""
+        if index == 0:
+            # Switched to Live tab - show latest raw frame
+            if self.latest_frame is not None:
+                self._show_image_array(self.latest_frame, plot=self.imgplot)
+        elif index == 1:
+            # Switched to Stacked tab - show latest stack result
+            if self._stacking_enabled() and self.tracking_stack_frames:
+                stacked = self._get_stacked_image()
+                if stacked is not None:
+                    self._show_image_array(stacked, plot=self.imgplot_stacked)
 
     def capture_image(self):
         """Main capture function that handles both single and continuous modes"""
@@ -1897,14 +2623,55 @@ class MainWindow(QMainWindow):
             return
         if not self.is_tracking or not self._stacking_enabled():
             return
-        if self.tracking_stack is None or self.tracking_stack.shape != aligned.shape:
-            self.tracking_stack = np.array(aligned, dtype=np.float32, copy=True)
-            self.tracking_stack_count = 1
+        
+        mode = self.dpad.stack_mode_combo.currentText()
+        
+        # Always maintain ring buffer for median/sigma-clip (last N frames)
+        self.tracking_stack_frames.append(aligned.copy())
+        if len(self.tracking_stack_frames) > self.tracking_stack_max_frames:
+            self.tracking_stack_frames.pop(0)  # Remove oldest frame
+        
+        # Handle different stacking modes
+        if mode == "Mean-of-Medians":
+            # Batch median mode: collect frames, send batch to worker when full
+            self.tracking_batch_frames.append(aligned.copy())
+            
+            if len(self.tracking_batch_frames) >= self.tracking_batch_size:
+                if not self._batch_median_pending:
+                    # Send batch to worker for median computation (non-blocking)
+                    self._batch_median_pending = True
+                    frames_copy = [f.copy() for f in self.tracking_batch_frames]
+                    self._request_batch_median.emit(frames_copy)
+                    print(f"  Batch {self.tracking_median_batch_count + 1}: Computing median of {self.tracking_batch_size} frames in background...")
+                    
+                    # Clear batch for next round
+                    self.tracking_batch_frames = []
+            else:
+                # Show both current batch progress AND total frames processed
+                total_so_far = self.tracking_median_batch_count * self.tracking_batch_size + len(self.tracking_batch_frames)
+                print(f"  Batch progress: {len(self.tracking_batch_frames)}/{self.tracking_batch_size} frames (total: {total_so_far} frames processed)")
+        
+        elif self.dpad.deep_space_checkbox.isChecked() and mode == "Mean":
+            # Deep space mean mode: unlimited accumulator with weight map
+            if self.tracking_accumulator is None or self.tracking_accumulator.shape != aligned.shape:
+                self.tracking_accumulator = np.array(aligned, dtype=np.float64, copy=True)
+                self.tracking_accumulator_count = 1
+                # Initialize weight map - tracks non-zero pixel contributions
+                self.tracking_weight_map = np.ones_like(aligned, dtype=np.float64)
+                self.tracking_weight_map[aligned == 0] = 0.0
+            else:
+                self.tracking_accumulator += aligned.astype(np.float64)
+                self.tracking_accumulator_count += 1
+                # Update weight map: increment where frame has non-zero data
+                self.tracking_weight_map += (aligned > 0).astype(np.float64)
+            
+            print(f"  Stack: {len(self.tracking_stack_frames)} in buffer, {self.tracking_accumulator_count} total accumulated")
         else:
-            self.tracking_stack += aligned
-            self.tracking_stack_count += 1
-        print(f"  Stack depth: {self.tracking_stack_count} frame(s)")
-        self._show_image_array(self._stack_mean_uint8())
+            print(f"  Stack depth: {len(self.tracking_stack_frames)} frame(s)")
+        
+        # Update stacked view ONLY if that tab is visible (critical for remote desktop performance)
+        if self.cam1_tabs.currentIndex() == 1:
+            self._show_image_array(self._get_stacked_image(), plot=self.imgplot_stacked)
 
     def _on_captured_frame(self, frames):
         """Dark-subtract and display frames that arrived from the capture worker."""
@@ -1917,13 +2684,26 @@ class MainWindow(QMainWindow):
         if image_np is None and image2_np is None:
             return
 
-        if image_np is not None and self.is_calibrating and len(self.calibration_frames) < 10:
-            self.calibration_frames.append(image_np.copy())
-            print(f"Dark frame {len(self.calibration_frames)}/10 collected")
-            if len(self.calibration_frames) == 10:
+        # Collect calibration frames
+        if self.is_calibrating:
+            if image_np is not None and len(self.calibration_frames) < 10:
+                self.calibration_frames.append(image_np.copy())
+                print(f"Camera 1 dark frame {len(self.calibration_frames)}/10 collected")
+            
+            if image2_np is not None and len(self.calibration_frames2) < 10:
+                self.calibration_frames2.append(image2_np.copy())
+                print(f"Camera 2 dark frame {len(self.calibration_frames2)}/10 collected")
+            
+            # Check if both cameras (if present) have enough frames
+            cam1_done = image_np is None or len(self.calibration_frames) >= 10
+            cam2_done = image2_np is None or len(self.calibration_frames2) >= 10
+            
+            if cam1_done and cam2_done:
                 self.stop_continuous_capture()
                 self.finish_hotspot_calibration()
+                return
 
+        # Apply dark frame subtraction for Camera 1
         if image_np is not None and self.hotspot_mask is not None and not self.is_calibrating:
             if len(image_np.shape) == 3 and len(self.hotspot_mask.shape) == 2:
                 image_np = image_np.astype(np.float32)
@@ -1933,7 +2713,19 @@ class MainWindow(QMainWindow):
             elif image_np.shape == self.hotspot_mask.shape:
                 image_np = np.clip(image_np.astype(np.float32) - self.hotspot_mask, 0, 255).astype(np.uint8)
             else:
-                print(f"Warning: Dark frame shape {self.hotspot_mask.shape} doesn't match image shape {image_np.shape}. Skipping subtraction.")
+                print(f"Warning: Camera 1 dark frame shape {self.hotspot_mask.shape} doesn't match image shape {image_np.shape}. Skipping subtraction.")
+
+        # Apply dark frame subtraction for Camera 2
+        if image2_np is not None and self.hotspot_mask2 is not None and not self.is_calibrating:
+            if len(image2_np.shape) == 3 and len(self.hotspot_mask2.shape) == 2:
+                image2_np = image2_np.astype(np.float32)
+                for i in range(image2_np.shape[2]):
+                    image2_np[:, :, i] = np.clip(image2_np[:, :, i] - self.hotspot_mask2, 0, 255)
+                image2_np = image2_np.astype(np.uint8)
+            elif image2_np.shape == self.hotspot_mask2.shape:
+                image2_np = np.clip(image2_np.astype(np.float32) - self.hotspot_mask2, 0, 255).astype(np.uint8)
+            else:
+                print(f"Warning: Camera 2 dark frame shape {self.hotspot_mask2.shape} doesn't match image shape {image2_np.shape}. Skipping subtraction.")
 
         if image_np is not None:
             self.display_image(image_np)
@@ -1978,6 +2770,9 @@ class MainWindow(QMainWindow):
         
         # Update pixel info display if mouse is hovering
         plot.update_pixel_info()
+        
+        # Update projection plots
+        plot.update_projections()
 
 
     def display_image(self, image_np):

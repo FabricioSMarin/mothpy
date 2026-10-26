@@ -18,17 +18,17 @@ Preferences preferences;
 
 // **Stepper Motor Pin Assignments** 30-pin board win nuk
 //LR
-#define STEP_PIN_2 12
-#define DIR_PIN_2  13
-#define ENABLE_PIN_2 14
+#define STEP_PIN_2 18
+#define DIR_PIN_2  19
+#define ENABLE_PIN_2 17
 //NF
-#define STEP_PIN_3 26
-#define DIR_PIN_3  27
-#define ENABLE_PIN_3 25
+#define STEP_PIN_3 22
+#define DIR_PIN_3  23
+#define ENABLE_PIN_3 21
 //UD
-#define STEP_PIN_1 22
-#define DIR_PIN_1  21
-#define ENABLE_PIN_1 23
+#define STEP_PIN_1 5
+#define DIR_PIN_1  16
+#define ENABLE_PIN_1 4
 
 
 

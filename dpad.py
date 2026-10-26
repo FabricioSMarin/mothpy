@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QGridLayout, QSizePolicy, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QCheckBox
+from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QGridLayout, QSizePolicy, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QCheckBox, QComboBox
 import sys
 from PyQt5.QtCore import Qt
 
@@ -100,11 +100,43 @@ class DPad(QWidget):
             "Translate to ROI1 and rotate using the ROI1→ROI2 angle before averaging. "
             "Turn off to watch live pointing while tracking."
         )
+        
+        # Stack display mode selector
+        stack_mode_layout = QHBoxLayout()
+        stack_mode_label = QLabel("Stack mode:")
+        stack_mode_label.setFixedWidth(80)
+        self.stack_mode_combo = QComboBox()
+        self.stack_mode_combo.addItems(["Mean", "Median", "Sigma-clip", "Mean-of-Medians"])
+        self.stack_mode_combo.setToolTip(
+            "Mean: Simple average of all frames\n"
+            "Median: Median of all frames (rejects outliers)\n"
+            "Sigma-clip: Mean after rejecting outliers (3σ)\n"
+            "Mean-of-Medians: Compute median every 100 frames, then average those\n"
+            "  (best SNR + outlier rejection for deep space)"
+        )
+        stack_mode_layout.addWidget(stack_mode_label)
+        stack_mode_layout.addWidget(self.stack_mode_combo)
+        
+        # Deep space mode checkbox
+        self.deep_space_checkbox = QCheckBox("Deep Space Mode (unlimited accumulation)")
+        self.deep_space_checkbox.setChecked(False)
+        self.deep_space_checkbox.setToolTip(
+            "ENABLED: Accumulates ALL frames forever (best SNR for deep sky)\n"
+            "  • Mean uses unlimited accumulator with weight map (handles rotation)\n"
+            "  • Mean-of-Medians: batches are unlimited (independent of this setting)\n"
+            "  • Median/Sigma-clip use last 100 frames only\n"
+            "  • Ideal for faint nebulae, galaxies, etc.\n\n"
+            "DISABLED: Ring buffer keeps only last 100 frames\n"
+            "  • All modes use recent 100 frames (except Mean-of-Medians)\n"
+            "  • Useful for tracking tests, shorter sessions"
+        )
 
         controls_layout.addLayout(ud_layout)
         controls_layout.addLayout(lr_layout)
         controls_layout.addLayout(nf_layout)
         controls_layout.addWidget(self.stack_checkbox)
+        controls_layout.addLayout(stack_mode_layout)
+        controls_layout.addWidget(self.deep_space_checkbox)
         self.layout.addLayout(controls_layout)
 
         self.setLayout(self.layout)

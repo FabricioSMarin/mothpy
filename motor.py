@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFrame
+from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFrame, QCheckBox
 from PyQt5.QtCore import pyqtSignal
 import sys
 
@@ -12,6 +12,7 @@ class MotorSettings(QWidget):
         self.velo = None
         self.acc = None
         self.bac = None
+        self.inverted = False
         self.initUI()
 
 
@@ -48,6 +49,14 @@ class MotorSettings(QWidget):
             row_layout.addWidget(line_edit)
             self.fields_layout.addLayout(row_layout)
         
+        # Add Invert checkbox
+        invert_layout = QHBoxLayout()
+        self.invert_checkbox = QCheckBox("Invert Direction")
+        self.invert_checkbox.setStyleSheet("color: #ffaa66;")
+        invert_layout.addWidget(self.invert_checkbox)
+        invert_layout.addStretch()
+        self.fields_layout.addLayout(invert_layout)
+        
         self.main_layout.addWidget(self.container)
         self.setLayout(self.main_layout)
         self.setWindowTitle("Collapsible PyQt5 Widget")
@@ -58,6 +67,7 @@ class MotorSettings(QWidget):
         self.fields["Velocity"].editingFinished.connect(self.update_velocity)
         self.fields["Acceleration"].editingFinished.connect(self.update_acceleration)
         self.fields["Backlash"].editingFinished.connect(self.update_backlash)
+        self.invert_checkbox.stateChanged.connect(self.update_inverted)
 
         return self.main_layout
 
@@ -127,3 +137,7 @@ class MotorSettings(QWidget):
             setattr(self, "bac", None)
             print("Invalid backlash")
             self.fields["Backlash"].setText("")
+    
+    def update_inverted(self, state):
+        self.inverted = bool(state)
+        self.settingsChanged.emit()
