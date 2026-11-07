@@ -97,8 +97,10 @@ class DPad(QWidget):
         self.stack_checkbox = QCheckBox("Stack while tracking")
         self.stack_checkbox.setChecked(False)
         self.stack_checkbox.setToolTip(
-            "Translate to ROI1 and rotate using the ROI1→ROI2 angle before averaging. "
-            "Turn off to watch live pointing while tracking."
+            "Translate to ROI1 and rotate using the ROI1→ROI2 angle before averaging.\n"
+            "Turn off to watch live pointing while tracking.\n\n"
+            "⚠️ Auto-disabled if frame rate >2 fps (exposure <500ms)\n"
+            "For fast tracking, use secondary camera for long-exposure stacking."
         )
         
         # Stack display mode selector

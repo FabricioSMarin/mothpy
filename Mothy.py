@@ -523,7 +523,7 @@ class MainWindow(QMainWindow):
         self.tracking_timer = QTimer()
         self.tracking_timer.timeout.connect(self.perform_tracking_update)
         self.is_tracking = False
-        self.tracking_interval = 6000  # 6 seconds in milliseconds
+        self.tracking_interval = 1000  # 1 second in milliseconds (motor correction rate)
         self.live_capture_interval = 100  # ms, preview-only loop
         # Star lock from the first successful tracking acquisition (image coords).
         # Later frames are compared against this fixed position to avoid walk-off.
@@ -1333,11 +1333,24 @@ class MainWindow(QMainWindow):
             self.is_tracking = True
             self._reset_tracking_session()
             capture_interval = self._capture_interval_ms()
+            
+            # Check if frame rate is too fast for stacking - prioritize tracking!
+            stacking_requested = self.dpad.stack_checkbox.isChecked()
+            if stacking_requested and capture_interval < 500:
+                print("=" * 60)
+                print("⚠️  WARNING: FRAME RATE TOO HIGH FOR STACKING")
+                print(f"  Frame interval: {capture_interval}ms ({1000.0/capture_interval:.1f} fps)")
+                print(f"  Stacking disabled to prioritize tracking performance")
+                print(f"  Recommendation: Use exposure ≥500ms for stacking, or disable stacking")
+                print("=" * 60)
+                self.dpad.stack_checkbox.setChecked(False)
+                stacking_requested = False
+            
             print("=" * 60)
             print("STAR TRACKING STARTED")
-            print(f"Motor update interval: {self.tracking_interval/1000:.1f} seconds")
-            print(f"Stack/capture interval: {capture_interval/1000:.1f} seconds "
+            print(f"Frame/motor update rate: {capture_interval/1000:.3f} seconds "
                   f"({1000.0/capture_interval:.2f} fps)")
+            print(f"  Motor corrections issued after EVERY frame capture")
             print(f"Max U/D steps (d-pad): {self.dpad.ud_lineedit.text()}")
             print(f"Max L/R steps (d-pad): {self.dpad.lr_lineedit.text()}")
             stacking = "ON" if self._stacking_enabled() else "OFF"
@@ -1368,10 +1381,7 @@ class MainWindow(QMainWindow):
                 self.start_continuous_capture()
             else:
                 self.capture_timer.start(capture_interval)
-                print(f"Capture interval set to {capture_interval} ms for stacking")
-
-            self.perform_tracking_update()
-            self.tracking_timer.start(self.tracking_interval)
+                print(f"Capture interval set to {capture_interval} ms")
         else:
             self._stop_tracking_session()
 
@@ -1383,8 +1393,11 @@ class MainWindow(QMainWindow):
 
     def _recommended_tracking_capture_interval_ms(self):
         """Exposure + time to centroid, shift-add, save ROI debug, and refresh the view."""
-        processing_ms = 1500
-        return int(max(2000, self._exposure_ms() + processing_ms))
+        # Processing overhead: centroiding, alignment, logging (much faster than old estimate)
+        processing_ms = 200  # Reduced from 1500ms - modern computers are fast!
+        # Minimum interval to avoid overwhelming the system
+        min_interval_ms = 100  # Allow fast tracking (was 2000ms - way too slow!)
+        return int(max(min_interval_ms, self._exposure_ms() + processing_ms))
 
     def _capture_interval_ms(self):
         if self.is_tracking:
@@ -2729,6 +2742,9 @@ class MainWindow(QMainWindow):
 
         if image_np is not None:
             self.display_image(image_np)
+            # If tracking is enabled, process this frame immediately for tracking/motor correction
+            if self.is_tracking:
+                self.perform_tracking_update()
         if image2_np is not None:
             self._show_camera2_array(image2_np)
 
